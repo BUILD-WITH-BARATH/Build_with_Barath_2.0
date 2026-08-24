@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .backdrop-blur {
+    backdrop-filter: blur(10px);
+  }
+}
+
+body {
+  @apply bg-slate-50 text-slate-800;
+}
