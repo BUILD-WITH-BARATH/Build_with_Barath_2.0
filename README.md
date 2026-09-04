@@ -1,4 +1,4 @@
-﻿# CyberAccess: Deterministic-First Dual-Layer BOLA Defense
+﻿# CyberAccess: Deterministic-First Dual-Layer BOLA Defense.
 
 [![OWASP API1:2023 Compliant](https://img.shields.io/badge/OWASP-API1%3A2023_BOLA-red.svg)](https://owasp.org/API-Security/editions/2023/en/0x11-t10/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
