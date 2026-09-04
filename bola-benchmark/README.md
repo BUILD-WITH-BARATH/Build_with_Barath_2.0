@@ -32,6 +32,20 @@ Run the 24 automated unit and security scenario tests:
 pytest test_detector.py -v
 ```
 
+## 📈 Running the Reproducible Benchmark
+
+`benchmark.py` runs every scenario in `EXTERNAL_VALIDATION.md` in-process (no server needed) and writes evidence to `results/`:
+
+```bash
+python benchmark.py
+```
+
+* `results/events.csv` — every request issued by the run (subject, record, status, decision, risk score, latency)
+* `results/metrics.json` — pass/fail per scenario plus `requests_to_first_block` (detection latency)
+* `results/warmup_curve.csv` — a fresh identity's risk score after each successive unauthorized request, showing how many requests it takes to escalate Normal → Suspicious → High Risk → Attack
+
+`results/` is untracked (see `.gitignore`) since it's regenerated output, not source.
+
 ## 📁 Key Endpoints
 
 | Method | Endpoint | Description |

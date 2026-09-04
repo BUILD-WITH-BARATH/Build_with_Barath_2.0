@@ -16,6 +16,8 @@ npm run dev
 
 * **Dashboard URL:** `http://localhost:5173`
 
+By default the dashboard talks to the backend at `http://127.0.0.1:8000`. If your backend runs elsewhere, copy `.env.example` to `.env` and set `VITE_API_BASE_URL`.
+
 ## 🌟 Key Features
 
 * **Real-Time Threat Radar:** Visualizes risk scores ($0 - 100$) and tripped threat signals.

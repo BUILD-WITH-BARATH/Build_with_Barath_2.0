@@ -73,9 +73,12 @@ def seed_database() -> None:
 def authorization_context(subject: str, record_id: int) -> dict:
     """Authoritative policy. The learned graph is never an authorization source."""
     with db() as c:
+        DENY_EXPLANATION = "Access denied: you are not the owner, are not assigned, and have no active delegation."
         record = c.execute("SELECT owner_id FROM records WHERE id = ?", (record_id,)).fetchone()
         if not record:
-            return {"authorization": None, "explanations": ["The requested record is unavailable."], "delegation": None}
+            # Deliberately identical to the "exists but denied" message below: a distinguishable
+            # response would let a caller use record existence as a pre-authorization oracle.
+            return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
         if record["owner_id"] == subject:
             return {"authorization": "owner", "explanations": ["Access allowed: you own this record."], "delegation": None}
         if c.execute("SELECT 1 FROM assignments WHERE subject_id = ? AND record_id = ?", (subject, record_id)).fetchone():
@@ -93,9 +96,7 @@ def authorization_context(subject: str, record_id: int) -> dict:
                                    "expires_at_unix": round(grant["expires_at"], 3), "seconds_remaining": seconds_remaining}}
         if grant:
             return {"authorization": None, "explanations": ["Access denied: your delegated permission has expired."], "delegation": None}
-    return {"authorization": None,
-            "explanations": ["Access denied: you are not the owner, are not assigned, and have no active delegation."],
-            "delegation": None}
+    return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
 
 
 def record_audit(subject: str, record_id: int, authorization: str | None, decision: str, outcome: str, explanations: list[str]) -> None:
@@ -398,7 +399,10 @@ def get_stats() -> dict:
     return {"active_subjects": len(engine.history), "blocked_subjects": blocked, "coordinated_attacks": coordinated}
 
 @app.get("/events")
-def get_events() -> dict:
+def get_events(x_subject: str | None = Header(default=None)) -> dict:
+    # Same audit data as /audit-events (kept for backward compatibility); must carry the same gate.
+    if x_subject != "security_admin":
+        raise HTTPException(403, "Audit access requires the security_admin subject")
     with db() as c:
         rows = c.execute("SELECT id, occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation FROM audit_events ORDER BY id DESC LIMIT 50").fetchall()
     return {"events": [dict(row) for row in rows]}
