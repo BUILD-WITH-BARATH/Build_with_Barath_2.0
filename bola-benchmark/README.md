@@ -1,35 +1,45 @@
-# BOLA graph benchmark
+﻿# Backend API: BOLA Benchmark & Detection Engine
 
-This is a minimal reproducible, **synthetic** benchmark for an API object-access detector.
+FastAPI-powered backend implementing **Layer 1 (Deterministic SQL Authorization)** and **Layer 2 (Behavioral Risk Engine)**.
 
-## Run
+## 🚀 Getting Started
 
-From this directory, use the bundled Python runtime:
+### 1. Setup Environment
+```bash
+python -m venv .venv
 
-```powershell
-& 'C:\Users\suriy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' benchmark.py
-& 'C:\Users\suriy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m uvicorn app:app --port 8000
+# Windows:
+.\.venv\Scripts\activate
+# Linux / macOS:
+source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
-The benchmark writes `results/events.csv`, `results/metrics.json`, and `results/warmup_curve.csv`.
+### 2. Run the Server
+```bash
+uvicorn app:app --port 8000 --reload
+```
 
-## Manual demo
+* **API Docs (Swagger UI):** `http://127.0.0.1:8000/docs`
+* **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
 
-Start the server, open `http://127.0.0.1:8000/docs`, and try `GET /records/{record_id}` with the `X-Subject` header:
+## 🧪 Running Security Test Suite
 
-* `dr_singh`, record `17`: an allowed assigned-access decision with an explanation.
-* `support_amy`, record `17`: an allowed delegated-access decision showing the ticket, approver, expiry, and seconds remaining.
-* `attacker`, record `17`: a denied decision that explains the missing permission. Repeat four different record IDs to receive a behavioral BOLA block with its signals.
-* `GET /audit-events` with `X-Subject: security_admin`: the last 100 allow/deny/block decisions. This endpoint is demo-only; a production implementation would use the organisation's existing security-admin identity and audit storage.
+Run the 24 automated unit and security scenario tests:
 
-## Design and safety claims
+```bash
+pytest test_detector.py -v
+```
 
-* **Authoritative authorization comes first.** Owners, medical assignments, and explicit time-bound delegated grants are the only allowed edges. A learned graph never grants access.
-* **Cold start is observe-only for authorized access.** A valid first access creates a graph edge but is not blocked because it is unseen.
-* **Fail-safe behavior:** unauthorized access is denied by the API; it is escalated to a detector block after four distinct denials in 30 seconds or three sequential-ID transitions. Each decision is recorded in a local audit log and includes human-readable reasons. In production, wire a block to your gateway/rate limiter and retain audit logs.
-* **Poisoning resistance:** denied events never create graph edges.
-* **Caveat:** all efficacy numbers are from deterministic synthetic traffic, not production data. The ASGI latency excludes network, TLS, reverse proxy, and external-policy-service time.
+## 📁 Key Endpoints
 
-## Assumption to confirm
-
-The implemented detector treats the graph as behavioral telemetry plus a strict authorization policy. If your intended proposal instead lets learned graph relationships authorize access, confirm that explicitly: it needs a much stronger identity, expiry, revocation, and approval model to remain safe.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/records/{record_id}` | Fetch a record (Evaluates Layer 1 Auth + Layer 2 Risk) |
+| `GET` | `/audit-events` | View recent authorization audit logs (`security_admin` only) |
+| `GET` | `/risk/{subject}` | Inspect real-time risk score and signals for a user |
+| `GET` | `/stats` | Telemetry overview: active subjects, blocked actors, attacks |
+| `POST` | `/simulate/rapid` | Run simulated rapid BOLA fuzzing attack |
+| `POST` | `/simulate/low_and_slow` | Run simulated stealth reconnaissance attack |
+| `POST` | `/reset` | Reset SQLite database and in-memory sliding windows |
