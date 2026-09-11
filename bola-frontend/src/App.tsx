@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { LoginView } from './LoginView';
+import { LoginView, DEMO_PWD, ADMIN_PWD } from './LoginView';
 import { CanaryAlertBanner } from './components/CanaryAlertBanner';
 import { AdvancedDefenseLab } from './components/AdvancedDefenseLab';
 import { AbacExplorer } from './components/AbacExplorer';
@@ -165,9 +165,15 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     fetchData();
+    // 6s, not 2.5s: fetchData fires 5 parallel requests per cycle, and a
+    // permanent SSE connection (below) already holds one of Chrome's 6
+    // same-origin HTTP/1.1 connection slots. At 2.5s, back-to-back polling
+    // cycles could saturate all 6 slots continuously, starving any on-demand
+    // fetch (e.g. opening the ABAC tab) - it would queue behind the polling
+    // storm indefinitely since a free slot never lasted long enough to grab.
     const timer = setInterval(() => {
       fetchData();
-    }, 2500);
+    }, 6000);
     return () => clearInterval(timer);
   }, [fetchData, currentUser]);
 
@@ -269,7 +275,7 @@ export default function App() {
     setIsProbing(true);
     setProbeResult(null);
     try {
-      const pwd = probeActor === 'security_admin' ? 'admin_changeme123' : 'changeme123';
+      const pwd = probeActor === 'security_admin' ? ADMIN_PWD : DEMO_PWD;
       const loginRes = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -833,7 +839,7 @@ export default function App() {
                 <span className="text-gray-300">Signed in as {currentUser.subject}</span>
                 <button
                   type="button"
-                  onClick={() => handleLogin('security_admin', 'admin_changeme123')}
+                  onClick={() => handleLogin('security_admin', ADMIN_PWD)}
                   className="text-[#FF3B5C] hover:underline font-bold"
                 >
                   Switch to Admin ➔

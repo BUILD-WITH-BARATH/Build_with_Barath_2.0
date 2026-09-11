@@ -9,12 +9,20 @@ export interface DemoAccount {
   icon: string;
 }
 
+// Mirrors the backend's own env-var-with-dev-fallback pattern (DEMO_PASSWORD /
+// ADMIN_PASSWORD in bola-benchmark/app.py) instead of duplicating the literal
+// passwords - if a deployment overrides them on the backend, set the matching
+// VITE_ vars here so these quick-login buttons keep working instead of silently
+// failing with "invalid password".
+export const DEMO_PWD = import.meta.env.VITE_DEMO_PASSWORD || 'changeme123';
+export const ADMIN_PWD = import.meta.env.VITE_ADMIN_PASSWORD || 'admin_changeme123';
+
 export const DEMO_ACCOUNTS: DemoAccount[] = [
-  { id: 'security_admin', label: 'SOC Admin', role: 'security_admin', pwd: 'admin_changeme123', badge: 'border-[#FF3B5C]/60 text-[#FF3B5C] bg-[#201013]', icon: '🛡️' },
-  { id: 'alice', label: 'Alice (Owner 1-50)', role: 'customer', pwd: 'changeme123', badge: 'border-[#404040] text-[#F5F5F5] bg-[#1a1a1a]', icon: '👤' },
-  { id: 'bob', label: 'Bob (Owner 51-100)', role: 'customer', pwd: 'changeme123', badge: 'border-[#404040] text-[#F5F5F5] bg-[#1a1a1a]', icon: '👤' },
-  { id: 'dr_singh', label: 'Dr. Singh (Assigned)', role: 'doctor', pwd: 'changeme123', badge: 'border-emerald-500/50 text-emerald-400 bg-emerald-950/30', icon: '🩺' },
-  { id: 'attacker_1', label: 'Attacker 1 (Threat)', role: 'customer', pwd: 'changeme123', badge: 'border-orange-500/50 text-orange-400 bg-orange-950/30', icon: '🥷' },
+  { id: 'security_admin', label: 'SOC Admin', role: 'security_admin', pwd: ADMIN_PWD, badge: 'border-[#FF3B5C]/60 text-[#FF3B5C] bg-[#201013]', icon: '🛡️' },
+  { id: 'alice', label: 'Alice (Owner 1-50)', role: 'customer', pwd: DEMO_PWD, badge: 'border-[#404040] text-[#F5F5F5] bg-[#1a1a1a]', icon: '👤' },
+  { id: 'bob', label: 'Bob (Owner 51-100)', role: 'customer', pwd: DEMO_PWD, badge: 'border-[#404040] text-[#F5F5F5] bg-[#1a1a1a]', icon: '👤' },
+  { id: 'dr_singh', label: 'Dr. Singh (Assigned)', role: 'doctor', pwd: DEMO_PWD, badge: 'border-emerald-500/50 text-emerald-400 bg-emerald-950/30', icon: '🩺' },
+  { id: 'attacker_1', label: 'Attacker 1 (Threat)', role: 'customer', pwd: DEMO_PWD, badge: 'border-orange-500/50 text-orange-400 bg-orange-950/30', icon: '🥷' },
 ];
 
 export function LoginView({

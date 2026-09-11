@@ -457,12 +457,26 @@ def init_schema() -> None:
             );
             """
         )
+    # Each defensive migration below gets its OWN connection/transaction, not a
+    # shared one. Postgres aborts an entire transaction on the first error inside
+    # it (e.g. "column already exists" from a migration that already ran) - every
+    # subsequent statement in that same transaction then silently no-ops even
+    # though its own try/except never sees an error, because the connection
+    # itself is already in an aborted state by the time it runs. Sharing one
+    # `with db() as c:` block across all three meant only the FIRST migration on
+    # any given run could ever actually apply.
+    for migration_sql in (
+        "ALTER TABLE risk_events ADD COLUMN http_verb TEXT NOT NULL DEFAULT 'GET'",
+        "ALTER TABLE records ADD COLUMN classification TEXT DEFAULT 'standard'",
+        # records.id was originally INTEGER (single-tenant demo records only); the
+        # schema above now declares it TEXT (external /v1/* tenants use arbitrary
+        # string resource IDs, not just sequential integers). A database created
+        # before this change keeps the old INTEGER column until this runs once.
+        "ALTER TABLE records ALTER COLUMN id TYPE TEXT",
+    ):
         try:
-            c.execute("ALTER TABLE risk_events ADD COLUMN http_verb TEXT NOT NULL DEFAULT 'GET'")
-        except Exception:
-            pass
-        try:
-            c.execute("ALTER TABLE records ADD COLUMN classification TEXT DEFAULT 'standard'")
+            with db() as c:
+                c.execute(migration_sql)
         except Exception:
             pass
 
@@ -913,7 +927,12 @@ class BehavioralRiskEngine:
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
 
         def _is_tracked_resource(ep: str) -> bool:
-            return ep in ("records", "v1", "records_batch", "records_mutation", "records_abac",
+            # "v1_batch" was missing here - denied requests through /v1/authorize-batch
+            # never counted toward unauthorized_unique_object_pressure or
+            # low_and_slow_reconnaissance (the two heaviest-weighted signals),
+            # so an attacker could evade both simply by batching instead of
+            # calling /v1/authorize one at a time.
+            return ep in ("records", "v1", "v1_batch", "records_batch", "records_mutation", "records_abac",
                           "graphql", "hierarchy", "exports", "stored_ref", "async_jobs") or ep.startswith("body_ref:")
 
         unique_denied_short = len({e.record_id for e in denied_short if _is_tracked_resource(e.endpoint)})
@@ -1209,6 +1228,9 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
     return [messages[s] for s in signals if s in messages]
 
 
+SELF_SERVICE_ROLES = {"customer", "doctor", "support"}
+
+
 @app.post("/auth/register")
 @limiter.limit("100/minute")
 def register(request: Request, payload: dict) -> dict:
@@ -1217,8 +1239,13 @@ def register(request: Request, payload: dict) -> dict:
     role = payload.get("role", "customer")
     if not subject or not password:
         raise HTTPException(400, "subject and password are required")
-    if role == ADMIN_ROLE:
-        raise HTTPException(400, f"Cannot self-register with the {ADMIN_ROLE} role")
+    # Whitelist, not a single-string blocklist: self-registration must only ever
+    # grant one of a small set of known-safe roles. A blocklist that only rejected
+    # ADMIN_ROLE would let anyone claim role="doctor" or any other arbitrary
+    # string - harmless today only because no other endpoint currently branches
+    # on those specific roles, which is a fragile thing to rely on staying true.
+    if role not in SELF_SERVICE_ROLES:
+        raise HTTPException(400, f"role must be one of: {', '.join(sorted(SELF_SERVICE_ROLES))}")
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode()
     with db() as c:
         if c.execute("SELECT 1 FROM users WHERE tenant_id = %s AND id = %s", (DEMO_TENANT_ID, subject)).fetchone():
@@ -1933,6 +1960,26 @@ def trigger_worker_execution(
     job_id: str,
     identity: tuple[str, str, str] = Depends(get_current_identity),
 ) -> dict:
+    subject, role, tenant_id = identity
+    # BOLA fix: execute_async_job()'s HMAC check only proves the job's own stored
+    # token wasn't tampered with in the DB - it says nothing about who is calling
+    # execute. Without this ownership check, any authenticated user in ANY tenant
+    # who has (or guesses) a job_id could execute someone else's job and receive
+    # their record data back. Mirrors get_job_status()'s scoping.
+    with db() as c:
+        job = c.execute(
+            "SELECT tenant_id, subject_id FROM async_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    is_owner = job["tenant_id"] == tenant_id and job["subject_id"] == subject
+    is_admin = role == ADMIN_ROLE and job["tenant_id"] == tenant_id
+    if not (is_owner or is_admin):
+        engine.evaluate(tenant_id, subject, job_id, allowed=False, endpoint="async_jobs")
+        record_audit(tenant_id, subject, job_id, None, "deny", "denied_job_execute",
+                     [f"Second-order BOLA prevented: '{subject}' attempted to execute a job owned by another subject/tenant."])
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this job",
+                                         "attack_type": "second_order_bola"})
     return execute_async_job(job_id)
 
 
@@ -2868,13 +2915,13 @@ func GetSecureRecord(c *gin.Context) {{
 }}"""
 
     sigma_rule = f"""title: BOLA IDOR Pattern Detected - Rapid Endpoint Traversal
-id: cb-bola-{hashlib.md5(f'{record_id}_{subject}'.encode()).hexdigest()[:8]}
+id: cb-bola-{hashlib.sha256(f'{record_id}_{subject}'.encode()).hexdigest()[:8]}
 status: experimental
 description: Detects systematic enumeration of private object IDs and unauthorized object-level access attempts.
 references:
     - https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/
 author: CyberAccess Security Suite
-date: 2026-09-11
+date: {time.strftime('%Y-%m-%d')}
 logsource:
     category: webserver
     service: api_gateway
