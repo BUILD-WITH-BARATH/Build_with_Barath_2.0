@@ -66,7 +66,8 @@ function CyberGlitchText({ text, className }: { text: string; className?: string
   return <span className={className}>{displayText}</span>;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
 
 type TabType = 'overview' | 'risk' | 'simulator' | 'audit' | 'architecture';
 
