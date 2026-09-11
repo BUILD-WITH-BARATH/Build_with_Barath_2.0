@@ -1,12 +1,13 @@
-# CyberAccess: Deterministic-First Dual-Layer BOLA Defense
+# CyberAccess: Deterministic-First Multi-Tenant BOLA Defense
 
 [![OWASP API1:2023 Compliant](https://img.shields.io/badge/OWASP-API1%3A2023_BOLA-red.svg)](https://owasp.org/API-Security/editions/2023/en/0x11-t10/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141%2B-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Postgres](https://img.shields.io/badge/Postgres-multi--tenant-336791.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![React + Vite](https://img.shields.io/badge/Frontend-React_19_%2B_Vite-61DAFB.svg?logo=react&logoColor=black)](https://vitejs.dev)
-[![Tests Passing](https://img.shields.io/badge/Tests-28%20Passing-brightgreen.svg)]()
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](bola-benchmark/Dockerfile)
+[![PyPI SDK](https://img.shields.io/badge/SDK-cyberaccess--sdk-3776AB.svg?logo=python&logoColor=white)](cyberaccess-sdk-python/)
 
-> A **prototype** demonstrating a Deterministic-First Dual-Layer Defense against Broken Object Level Authorization (BOLA / IDOR) vulnerabilities in modern APIs — hardened with real JWT auth, persistent risk state, and an ML anomaly signal. Read the [Known Limitations](#️-known-limitations--honest-caveats) section before treating any of this as production-ready.
+> A BOLA/IDOR (OWASP API1:2023) defense platform: a deterministic SQL authorization gate, a behavioral risk engine with 3-strike human-in-the-loop escalation, and two separate ML anomaly signals — now multi-tenant, Postgres-backed, and exposed as a real product API (`/v1/*`) with a Python SDK, alongside the original JWT-authenticated demo dashboard. Read [Known Limitations](#️-known-limitations--honest-caveats) before treating any of this as production-ready for a paying customer.
 
 ---
 
@@ -20,38 +21,60 @@ Traditional API gateways and ML-first security tools (like Salt Security or Trac
 
 ---
 
-## 🛡️ Our Solution: Dual-Layer Defense + ML Signal
+## 🛡️ The Defense: Deterministic Gate + Behavioral Engine + Dual ML Signals
 
-CyberAccess separates object authorization into two cooperative layers, plus an unsupervised ML layer that catches what the fixed rules structurally can't:
+1. **Layer 1 (Deterministic Auth Gate):** Hard SQL predicates (owner / assigned / active time-bound delegation grant). If none apply, immediately `403 Forbidden` with **zero data leakage** — and identical denial text whether the record exists or not, so existence can't be used as an oracle.
+2. **Layer 2 (Behavioral Risk Engine):** A Postgres-persisted sliding-window telemetry engine (30s short-burst / 1-hour low-and-slow) computing a $0$–$100$ risk score, escalating through a **3-strike lockout ladder** with human-in-the-loop admin review at strike 3. No identity is ever permanently banned without a person approving it.
+3. **Layer 3 (Two separate ML models):**
+   - **Per-subject signal** (`bola-benchmark/app.py`, `build_anomaly_model()`): an `IsolationForest` scoring the *combined shape* of a subject's behavior — catches combinations that stay just under every individual heuristic threshold. Trained on synthetic data, feeds `ml_behavioral_anomaly` into the risk score.
+   - **Per-endpoint signal** (`bola-benchmark/train_endpoint_anomaly_model.py`): a `RandomForestClassifier` trained on a **real, publicly labeled dataset** (Kaggle's [API access behaviour anomaly dataset](https://www.kaggle.com/datasets/tangodelta/api-access-behaviour-anomaly-dataset), 36k rows), scoring whether a record's access-graph shape looks like known-anomalous API traffic. Exposed via `GET /records/{id}/graph-risk`. Kept deliberately separate because the training distribution describes a different application's endpoints, not this app's — see [Known Limitations](#️-known-limitations--honest-caveats).
 
-1. **Layer 1 (Deterministic Auth Gate):** Strictly verifies object access via hard SQL predicates (`WHERE subject_id = ? AND record_id = ?`) backed by dynamic, time-bound delegation tickets. If a valid ticket or ownership is absent, it immediately returns `403 Forbidden` with **zero data leakage** — and identical denial text whether the record exists or not, so existence can't be used as an oracle.
-2. **Layer 2 (Behavioral Risk Engine):** A SQLite-persisted sliding-window telemetry engine that monitors failed attempts across dual time-windows (**30s short-burst** and **1-hour low-and-slow reconnaissance**) to dynamically calculate a risk score ($0$–$100$) and escalate through a **3-strike lockout ladder** with human-in-the-loop admin review at strike 3.
-3. **Layer 3 (ML Anomaly Signal):** Two separate models, kept intentionally apart:
-   - **Per-subject signal** (`app.py`, `build_anomaly_model()`): an `IsolationForest` scores the *combined shape* of a subject's behavior — catching combinations that stay just under every individual heuristic threshold. Trained on synthetic data. Feeds `ml_behavioral_anomaly` into the risk score.
-   - **Per-endpoint signal** (`train_endpoint_anomaly_model.py`, `models/endpoint_anomaly_model.joblib`): a `RandomForestClassifier` trained on a **real, publicly labeled dataset** (Kaggle's [API access behaviour anomaly dataset](https://www.kaggle.com/datasets/tangodelta/api-access-behaviour-anomaly-dataset)) that scores whether a record's access-graph shape (sessions/users/unique-APIs touching it, access timing/uniqueness) looks like known-anomalous API traffic. Kept separate because the dataset's ground truth describes a different app's endpoints, not this app's subjects/objects — see [Known Limitations](#️-known-limitations--honest-caveats) for the honest version of what that proxy can and can't claim.
-
-   Both are additive signals, not the authorization decision; Layer 1 alone still gates every allow/deny.
+   Both are additive diagnostic signals, not the authorization decision — Layer 1 alone gates every allow/deny.
 
 ---
 
-## 🔐 Authentication
+## 🏢 Multi-Tenant, Postgres-Backed, With a Real Product API
 
-Every protected endpoint requires a **JWT bearer token** — there is no client-supplied identity header anymore.
+Everything above now runs multi-tenant: every table carries a `tenant_id`, and a customer's traffic, risk scores, strikes, and blocks can never affect another tenant's — covered by dedicated isolation tests.
+
+Two front doors into the same engine:
+
+| | Auth | Who it's for |
+| :--- | :--- | :--- |
+| **Demo dashboard API** (`/auth/login`, `/records/{id}`, `/risk/{subject}`, ...) | JWT bearer token (bcrypt password login) | The seeded `demo` tenant — the SOC dashboard, local testing |
+| **Product API** (`/v1/authorize`, `/v1/tenants`) | Per-tenant API key (`X-API-Key`) | Another company's backend, calling this on every request |
+
+### `POST /v1/authorize` — the integration point
+
+The caller already knows their own object model (who owns what) — they report that decision to us, and get back a risk-adjusted final one:
 
 ```bash
-# 1. Log in (all seeded demo accounts share DEMO_PASSWORD, default "changeme123")
-curl -X POST http://127.0.0.1:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"subject": "alice", "password": "changeme123"}'
-# -> {"access_token": "...", "token_type": "bearer", "role": "customer", "expires_in": 3600}
-
-# 2. Use the token
-curl http://127.0.0.1:8000/records/1 -H "Authorization: Bearer <access_token>"
+curl -X POST https://<your-backend>/v1/authorize \
+  -H "X-API-Key: sk_..." -H "Content-Type: application/json" \
+  -d '{"subject": "user_123", "resource_id": "invoice_456", "authorized": true}'
+# -> {"decision": "allow" | "deny" | "block", "score": 0-100, "category": "...", "signals": [...]}
 ```
 
-New identities register first via `POST /auth/register` (`{"subject", "password", "role"}`). The `security_admin` role (required for `/audit-events`, `/admin/*`, `/soc/*`) uses a separate `ADMIN_PASSWORD`. Passwords are bcrypt-hashed; tokens are HS256-signed with `JWT_SECRET`. All three are environment-overridable dev-only defaults — **the app refuses to boot with `APP_ENV=prod` unless every one of them has been changed**, and refuses to boot in `prod` with an unset CORS origin.
+`authorized: true` can still come back `"decision": "block"` — that's the behavioral engine catching a pattern the caller's own ownership check structurally can't see (e.g. the same "owner" identity enumerating hundreds of resources in seconds).
 
-The React dashboard has a real login screen; the JWT lives only in memory (React state), never `localStorage`, and admin-only UI (audit feed, ban approval) only calls those endpoints when the logged-in user's own role is `security_admin`.
+New tenants (and their API key, shown once) are minted via `POST /v1/tenants`, gated by a `TENANT_SIGNUP_KEY`.
+
+### Python SDK: [`cyberaccess-sdk-python/`](cyberaccess-sdk-python/)
+
+```python
+from cyberaccess_sdk import CyberAccessClient
+from cyberaccess_sdk.fastapi import enforce
+
+guard = CyberAccessClient(api_key="sk_...", base_url="https://your-backend.example.com")
+
+@app.get("/records/{record_id}")
+def get_record(record_id: str, user=Depends(get_current_user)):
+    is_owner = record_id in user.owned_record_ids   # stays entirely yours
+    enforce(guard, subject=user.id, resource_id=record_id, authorized=is_owner)
+    return fetch_record(record_id)
+```
+
+Fails open by default (never takes a customer's API down if this service is unreachable), 12/12 unit tests pass against a fully mocked HTTP layer, and has been confirmed working end-to-end against the real deployed backend. Flask/Django/plain-script equivalent: `client.authorize_or_raise(...)`. Not yet published to PyPI (install from source or a git URL for now); Express and Django-native SDKs don't exist yet.
 
 ---
 
@@ -59,48 +82,52 @@ The React dashboard has a real login screen; the JWT lives only in memory (React
 
 ```mermaid
 flowchart TD
-    Client(["👤 Client / Doctor / Attacker"]) -->|"GET /records/{id}<br/>Authorization: Bearer JWT"| API["⚡ FastAPI Server"]
-    API --> AuthGate["get_current_identity()<br/>verify JWT signature + expiry"]
+    Client(["👤 Demo dashboard user"]) -->|"GET /records/{id}<br/>Authorization: Bearer JWT"| API["⚡ FastAPI Server"]
+    API --> AuthGate["get_current_identity()<br/>verify JWT, extract tenant_id"]
 
     subgraph L1 ["🔐 LAYER 1: Deterministic Auth Gate"]
-        AuthGate --> AuthContext["authorization_context(subject, record_id)"]
+        AuthGate --> AuthContext["authorization_context(tenant_id, subject, record_id)"]
         AuthContext --> DB_Owner{"1. Is Owner?"}
-        DB_Owner -- Yes --> L1_Pass1["✅ Result: 'owner'"]
+        DB_Owner -- Yes --> L1_Pass1["✅ 'owner'"]
         DB_Owner -- No --> DB_Assign{"2. Is Assigned?"}
-        DB_Assign -- Yes --> L1_Pass2["✅ Result: 'assigned'"]
-        DB_Assign -- No --> DB_Grant{"3. Active Delegation Grant?<br/>(expires_at > now)"}
-        DB_Grant -- Yes --> L1_Pass3["✅ Result: 'delegated'"]
-        DB_Grant -- No --> L1_Deny["❌ Result: NULL (Denied)"]
+        DB_Assign -- Yes --> L1_Pass2["✅ 'assigned'"]
+        DB_Assign -- No --> DB_Grant{"3. Active Delegation Grant?"}
+        DB_Grant -- Yes --> L1_Pass3["✅ 'delegated'"]
+        DB_Grant -- No --> L1_Deny["❌ NULL (Denied)"]
     end
 
-    L1_Pass1 & L1_Pass2 & L1_Pass3 --> L2_Input["Evaluate in Risk Engine (SQLite-backed)"]
+    L1_Pass1 & L1_Pass2 & L1_Pass3 --> L2_Input["Evaluate in Risk Engine (Postgres, tenant_id-scoped)"]
     L1_Deny --> L2_Input
 
-    subgraph L2 ["🧠 LAYER 2+3: Behavioral Risk Engine + ML Signal"]
-        L2_Input --> HistoryCheck{"Is Subject Currently Blocked?<br/>(risk_blocks table)"}
+    subgraph L2 ["🧠 LAYER 2+3: Behavioral Risk Engine + Per-Subject ML"]
+        L2_Input --> HistoryCheck{"Currently Blocked?<br/>(risk_blocks table)"}
         HistoryCheck -- Yes --> ForceBlock["🚫 HTTP 403 (Direct Block)"]
-        HistoryCheck -- No --> WindowUpdate["Record Event, Query Dual Sliding Windows (30s & 1hr)"]
+        HistoryCheck -- No --> WindowUpdate["Record Event, Query 30s & 1hr Windows"]
         WindowUpdate --> RiskEval["Compute Risk Signals"]
-        RiskEval --> S1["Rapid Unique IDs (≥4 in 30s) ➔ +45 pts"]
-        RiskEval --> S2["Sequential IDs (≥2 steps) ➔ +35 pts"]
-        RiskEval --> S3["Low-and-Slow Recon (≥15 in 1hr) ➔ +50 pts"]
-        RiskEval --> S4["High Failure Ratio (>50% fails) ➔ +20 pts"]
-        RiskEval --> S5["Endpoint Diversity (≥2 routes) ➔ +20 pts"]
-        RiskEval --> S6["IsolationForest Anomaly ➔ +15 pts"]
+        RiskEval --> S1["Rapid Unique IDs ➔ +45"]
+        RiskEval --> S2["Sequential IDs ➔ +35"]
+        RiskEval --> S3["Low-and-Slow Recon ➔ +50"]
+        RiskEval --> S4["High Failure Ratio ➔ +20"]
+        RiskEval --> S5["Endpoint Diversity ➔ +20"]
+        RiskEval --> S6["IsolationForest Anomaly ➔ +15"]
 
-        RiskEval --> ScoreCheck{"Is Risk Score ≥ 90?"}
+        RiskEval --> ScoreCheck{"Score ≥ 90?"}
         ScoreCheck -- Yes --> Strike["Register Strike<br/>1st: 2m soft · 2nd: 30m hard · 3rd: quarantine pending admin"]
         Strike --> SetBlock["🔒 HTTP 403 (blocked)"]
         ScoreCheck -- No --> FinalCheck{"Layer 1 Authorized?"}
-        FinalCheck -- No --> DenyOut["🛑 HTTP 403 Forbidden (No Data)"]
-        FinalCheck -- Yes --> AllowOut["✅ HTTP 200 OK (Data Returned)"]
+        FinalCheck -- No --> DenyOut["🛑 HTTP 403 (No Data)"]
+        FinalCheck -- Yes --> AllowOut["✅ HTTP 200 OK"]
     end
 
-    Client2(["👤 Client (any logged-in user)"]) -->|"GET /records/{id}/graph-risk<br/>Authorization: Bearer JWT"| API2["⚡ FastAPI Server"]
-    subgraph L3 ["🤖 SECOND ML MODEL (parallel, separate call — not part of Layer 1-3's allow/deny path)"]
-        API2 --> Features["compute_record_graph_features(record_id)<br/>from risk_events: sessions, users, timing, uniqueness"]
-        Features --> RF["RandomForestClassifier<br/>trained OFFLINE on real Kaggle-labeled data<br/>(train_endpoint_anomaly_model.py)"]
-        RF --> GraphOut["is_anomalous + anomaly_probability<br/>returned as diagnostic signal, not an allow/deny gate"]
+    Customer(["🏢 Customer backend"]) -->|"POST /v1/authorize<br/>X-API-Key"| API2["⚡ FastAPI Server"]
+    API2 --> V1["Same evaluate() as above,<br/>tenant_id from the API key"]
+    V1 --> V1Out["allow / deny / block"]
+
+    Client2(["👤 Any logged-in user"]) -->|"GET /records/{id}/graph-risk"| API3["⚡ FastAPI Server"]
+    subgraph L3 ["🤖 SECOND ML MODEL (parallel, separate call)"]
+        API3 --> Features["compute_record_graph_features(tenant_id, record_id)"]
+        Features --> RF["RandomForestClassifier<br/>trained OFFLINE on real Kaggle-labeled data"]
+        RF --> GraphOut["is_anomalous + anomaly_probability<br/>(diagnostic signal, not an allow/deny gate)"]
     end
 ```
 
@@ -113,16 +140,16 @@ $$\text{Risk Score} = \min\left(100, \sum \text{Tripped Signal Penalties}\right)
 | Signal Name | Window | Threshold Condition | Penalty |
 | :--- | :--- | :--- | :--- |
 | `unauthorized_unique_object_pressure` | Short (30s) | $\ge 4$ unique failed record IDs | **+45 pts** |
-| `sequential_id_enumeration` | Short (30s) | $\ge 2$ consecutive ID step increments | **+35 pts** |
+| `sequential_id_enumeration` | Short (30s) | $\ge 2$ consecutive ID step increments (numeric IDs only) | **+35 pts** |
 | `low_and_slow_reconnaissance` | Long (1 hr) | $\ge 15$ unique failed record IDs | **+50 pts** |
 | `high_failure_ratio` | Long (1 hr) | Failure rate $> 50\%$ with $> 5$ requests | **+20 pts** |
 | `endpoint_diversity` | Long (1 hr) | Failures across $\ge 2$ distinct endpoints | **+20 pts** |
-| `ml_behavioral_anomaly` | Long (1 hr) | IsolationForest flags the feature vector as an outlier | **+15 pts** |
+| `ml_behavioral_anomaly` | Long (1 hr) | Per-subject `IsolationForest` flags the feature vector as an outlier | **+15 pts** |
 
-* **0 – 39 (Normal):** Allowed if Layer 1 passes.
-* **40 – 69 (Suspicious):** Telemetry flagged; headers enriched with `X-Risk-Score`.
-* **70 – 89 (High Risk):** Escalated telemetry event logged.
-* **90 – 100 (Attack):** **3-strike escalation triggers** — see below.
+* **0–39 (Normal):** Allowed if Layer 1 passes.
+* **40–69 (Suspicious):** Telemetry flagged; headers enriched with `X-Risk-Score`.
+* **70–89 (High Risk):** Escalated telemetry event logged.
+* **90–100 (Attack):** 3-strike escalation triggers.
 
 ### 3-Strike Escalation & Human-in-the-Loop Ban Approval
 
@@ -132,19 +159,18 @@ $$\text{Risk Score} = \min\left(100, \sum \text{Tripped Signal Penalties}\right)
 | 2nd (within 1 hr) | 30-minute hard lockout | Automatic |
 | 3rd (within 1 hr) | Quarantined, pending review | **`security_admin` must approve or dismiss** via `POST /admin/approve-ban/{subject}` / `POST /admin/reject-ban/{subject}` |
 
-No identity is ever permanently banned without a human decision. Every strike, ban approval, and dismissal is written to the append-only audit log.
-
 ---
 
 ## ⚔️ Competitor Comparison
 
 | Capability | Traditional WAFs | Commercial ML API Security | **CyberAccess (This Project)** |
 | :--- | :--- | :--- | :--- |
-| **BOLA / IDOR Detection** | ❌ Blind (Cannot inspect object logic) | ⚠️ Probabilistic (Guesses anomalies) | ✅ **Deterministic-First (SQL Predicates)**, ML as a secondary signal only |
+| **BOLA / IDOR Detection** | ❌ Blind | ⚠️ Probabilistic | ✅ **Deterministic-First (SQL Predicates)**, ML as a secondary signal only |
 | **False Positive Rate** | High on traffic spikes | Moderate on operational shift changes | ✅ **0% for authorized delegations** (Layer 1 never depends on ML) |
-| **Baseline Poisoning** | N/A | ❌ Vulnerable to slow training | ✅ **Immune (Denials never create baseline edges)** |
-| **Data Leak Guarantee** | None | Statistical | ✅ **Mathematical Lock ($O(1) = 0$ bytes stolen)** |
-| **Identity Layer** | N/A | Varies | ✅ **JWT + bcrypt**, not a spoofable header |
+| **Baseline Poisoning** | N/A | ❌ Vulnerable to slow training | ✅ **Immune** (denials never create baseline edges) |
+| **Data Leak Guarantee** | None | Statistical | ✅ **Mathematical Lock** ($O(1) = 0$ bytes stolen) |
+| **Integration model** | N/A | Proprietary gateway | ✅ **SDK/middleware you drop into your own app** |
+| **Multi-tenant isolation** | N/A | Varies | ✅ **`tenant_id`-scoped Postgres, tested cross-tenant isolation** |
 
 ---
 
@@ -152,85 +178,93 @@ No identity is ever permanently banned without a human decision. Every strike, b
 
 ```
 Build_with_Barath_2.0/
-├── render.yaml               # Render.com one-click deployment blueprint
-├── bola-benchmark/           # Backend FastAPI Engine & Verification Suite
-│   ├── app.py                 # FastAPI app: JWT auth, SQL authorization, risk engine, ML signal
-│   ├── test_detector.py       # 28 automated unit & security integration tests
-│   ├── benchmark.py           # Reproducible scenario runner -> results/ (events.csv, metrics.json, warmup_curve.csv)
-│   ├── Dockerfile              # Container build, /health check, persistent-disk aware (DB_DIR)
-│   ├── .env.example            # JWT_SECRET / DEMO_PASSWORD / ADMIN_PASSWORD template
-│   ├── demo.db                 # Pre-seeded SQLite database (users, records, risk state)
-│   ├── audit.db                # Append-only audit log, separate from demo.db, survives /reset
-│   ├── requirements.txt        # Python dependencies
-│   └── EXTERNAL_VALIDATION.md  # Reproducibility & audit instructions
-└── bola-frontend/            # React + Vite Dashboard & Live Simulator
-    ├── src/App.tsx             # Login screen, SOC dashboard, attack simulators
-    ├── package.json            # Node.js dependencies
-    └── tailwind.config.js      # UI Styling configuration
+├── render.yaml                    # Render.com blueprint - auto-provisions Postgres + both services
+├── bola-benchmark/                # Backend: FastAPI, multi-tenant Postgres, risk engine, both ML models
+│   ├── app.py                       # JWT auth + /v1/* API-key auth, SQL authorization, risk engine, ML signals
+│   ├── train_endpoint_anomaly_model.py  # Offline training script for the real-data ML model
+│   ├── models/                      # Trained endpoint_anomaly_model.joblib (committed artifact)
+│   ├── test_detector.py             # Unit + multi-tenant isolation tests
+│   ├── benchmark.py                 # Reproducible scenario runner -> results/
+│   ├── Dockerfile                     # Container build, /health check
+│   ├── .env.example                   # DATABASE_URL / JWT_SECRET / DEMO_PASSWORD / ADMIN_PASSWORD / TENANT_SIGNUP_KEY
+│   └── EXTERNAL_VALIDATION.md         # Reproducibility & audit instructions
+├── cyberaccess-sdk-python/        # pip-installable customer-integration SDK
+│   ├── cyberaccess_sdk/              # client.py, fastapi.py, exceptions.py
+│   └── tests/                        # Fully mocked (respx) - no live backend needed
+└── bola-frontend/                 # React + Vite SOC dashboard (dark/crimson theme)
+    ├── src/App.tsx                   # Live stats, risk monitor, simulator, audit timeline
+    └── tailwind.config.js            # Brand color palette
 ```
 
 ---
 
 ## 🚀 Quick Start Guide
 
-### 1. Run Backend Server
+### 1. Get a Postgres database
+This app is Postgres-only (no SQLite fallback). Fastest path: a free hosted instance at [neon.tech](https://neon.tech) or [supabase.com](https://supabase.com) — copy the connection string.
+
+### 2. Run Backend Server
 ```bash
 cd bola-benchmark
 python -m venv .venv
-# Windows:
-.\.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
+# Windows: .\.venv\Scripts\activate      Linux/macOS: source .venv/bin/activate
 
 pip install -r requirements.txt
+cp .env.example .env   # fill in DATABASE_URL at minimum
 uvicorn app:app --port 8000 --reload
 ```
-* Interactive Swagger Docs: `http://127.0.0.1:8000/docs`
-* Health check: `http://127.0.0.1:8000/health`
-* Demo credentials (dev defaults, override via `.env` — see `bola-benchmark/.env.example`): any seeded user (`alice`, `bob`, `dr_singh`, `attacker_1`, ...) with password `changeme123`; `security_admin` with password `admin_changeme123`.
+* Swagger Docs: `http://127.0.0.1:8000/docs` · Health check: `http://127.0.0.1:8000/health`
+* Demo login: any seeded user (`alice`, `bob`, `dr_singh`, `attacker_1`, ...) with password `changeme123`; `security_admin` with `admin_changeme123`.
 
-### 2. Run Frontend Dashboard
+### 3. Run Frontend Dashboard
 ```bash
 cd bola-frontend
 npm install
 npm run dev
 ```
-* Access Dashboard: `http://localhost:5173`
-* Log in with any seeded demo account (see above) to reach the SOC dashboard.
 
-### 3. Run Automated Security Test Suite
+### 4. Run Tests
 ```bash
-cd bola-benchmark
-pytest test_detector.py -v
+cd bola-benchmark && pytest test_detector.py -v
+cd cyberaccess-sdk-python && pip install -e ".[fastapi,dev]" && pytest -v
 ```
 
-### 4. Run in Docker
+### 5. Run in Docker
 ```bash
 cd bola-benchmark
 docker build -t cyberaccess-backend .
-docker run -p 8000:8000 -v cyberaccess-data:/app/data cyberaccess-backend
+docker run -p 8000:8000 -e DATABASE_URL="postgresql://..." cyberaccess-backend
 ```
 
-### 5. Deploy to Render
-A `render.yaml` blueprint is included at the repo root for one-click deployment of both services. Before using it for anything beyond a throwaway demo, set `APP_ENV=prod` plus real `JWT_SECRET` / `DEMO_PASSWORD` / `ADMIN_PASSWORD` / `FRONTEND_ORIGIN` values on the backend service and attach a persistent disk at `DB_DIR` — the app **will refuse to boot** in `prod` mode until the secrets and CORS origin are set, by design.
+### 6. Deploy to Render
+`render.yaml` at the repo root provisions a managed Postgres database and both services automatically — no external Postgres account needed for production. `APP_ENV=prod` is set, so the app **refuses to boot** until you fill in `DEMO_PASSWORD` / `ADMIN_PASSWORD` / `FRONTEND_ORIGIN` (prompted in the Render dashboard after first deploy) — `JWT_SECRET` and `TENANT_SIGNUP_KEY` are auto-generated.
+
+### 7. Create a tenant and try `/v1/authorize`
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tenants -H "X-Signup-Key: dev-insecure-signup-key-change-in-production" \
+  -H "Content-Type: application/json" -d '{"name": "acme-corp"}'
+# -> {"tenant_id": "...", "api_key": "sk_...", "warning": "shown once"}
+
+curl -X POST http://127.0.0.1:8000/v1/authorize -H "X-API-Key: sk_..." \
+  -H "Content-Type: application/json" -d '{"subject": "u1", "resource_id": "r1", "authorized": true}'
+```
 
 ---
 
 ## ⚠️ Known Limitations & Honest Caveats
 
-This is a **synthetic prototype**, and we'd rather state its limits plainly than have a reviewer find them first:
+This is a **prototype**, and we'd rather state its limits plainly than have a reviewer find them first:
 
-* **Identity is now real, but demo-grade.** `POST /auth/register` + `POST /auth/login` issue signed JWT bearer tokens (HS256, bcrypt-hashed passwords) and every protected endpoint verifies them server-side. `JWT_SECRET`, `DEMO_PASSWORD`, and `ADMIN_PASSWORD` are dev-only defaults read from environment variables; the app refuses to boot with `APP_ENV=prod` until they're rotated.
-* **All traffic is synthetic.** Every number in this README (0% false positives, detection thresholds, etc.) comes from data generated via `/simulate/*` and `benchmark.py`. It has not been validated against real-world API traffic. See `bola-benchmark/EXTERNAL_VALIDATION.md` for the protocol to get an independent, non-self-graded rerun.
-* **Neither ML model learns or adapts once trained.** The per-subject `IsolationForest` is trained once, at process startup, on synthetic feature vectors — frozen for the life of the process, never seen real traffic, no retraining loop, no feedback from admin ban/dismiss decisions, no model versioning. The per-endpoint `RandomForestClassifier` (`train_endpoint_anomaly_model.py`) *is* trained on real labeled data, but it's a one-time offline training run whose artifact (`models/endpoint_anomaly_model.joblib`) is loaded as-is — running the script again on the same data produces the same model; nothing here retrains automatically or incorporates this app's own outcomes. "AI-powered" here means "two static models as secondary signals," not an adaptive or self-improving system.
-* **The per-endpoint model's features are a proxy, not a match.** Its training data (Kaggle) describes a different application's API graph — `num_sessions`, `num_users`, `num_unique_apis`, access timing/uniqueness, for *that* app's endpoints. This app's own per-record analogues (built from `risk_events`) are structurally similar but not the same distribution the model was trained on; treat its output as a rough signal, not a calibrated probability.
-* **`/reset` and `/simulate/*` stay unauthenticated in `DEMO_MODE`** (the default) so the dashboard's Reset and Attack Simulator buttons work without login. Setting `DEMO_MODE=false` gates both behind a `security_admin` JWT. Every genuinely sensitive endpoint (`/admin/*`, `/soc/*`, `/audit-events`) already requires one unconditionally.
-* **State is SQLite-backed and persistent**, not in-memory. The behavioral risk engine's sliding windows, strikes, blocks, and ban status live in `demo.db` — a server restart no longer clears risk history. Horizontal scaling across multiple API instances still isn't addressed (SQLite has no built-in replication); a real multi-instance deployment would move this to Redis or a shared database.
-* **A basic transport-layer rate limiter is in place** (`slowapi`, keyed by authenticated subject where available, IP otherwise). Limits are set generously for demo/test traffic (up to 1000/min on hot paths), not tuned for production load.
-* **The audit log is append-only and separate from the demo dataset** (`audit.db`, distinct file from `demo.db`) so `/reset` can no longer wipe incident history along with the seed data. It has no pagination yet (`/audit-events` returns the most recent 100).
-* **No live/hosted demo yet.** A `render.yaml` blueprint exists for one-click deployment, but there is no permanently-running deployed URL at this time.
-* **SQLite is a demo choice, not a scale choice.** The dataset (100 records, ~70 users) is small and fits in a single file; the authorization queries would need to be re-validated against a production-scale schema and index plan (Postgres + SQLAlchemy + migrations, most likely).
-* **No token revocation.** A leaked JWT stays valid until it expires (`JWT_EXPIRY_SECONDS`, default 1 hour) — there is no blocklist or session-invalidation mechanism yet.
+* **Postgres, not SQLite — but region matters.** The app is multi-tenant and Postgres-only. During this build, testing against a Neon (`us-east-2`) database from a distant dev machine measured **~1 second per query** (confirmed with a bare `SELECT 1`, not app overhead) — a network/region issue, not a code bug. In production, keep your backend and Postgres instance in the same or adjacent region; for local dev, prefer a nearby-region database or a local Postgres install.
+* **Each API request still does several sequential DB round trips** (blocked-until check, event insert, risk computation, audit insert) rather than one batched query. A connection pool (`psycopg_pool`) is in place, which helps a lot, but the per-request query count itself hasn't been optimized down. Fine at demo scale; worth revisiting before high-throughput production use.
+* **Neither ML model learns or adapts once trained.** The per-subject `IsolationForest` is trained once at process startup on synthetic data — frozen for the process's life, no retraining loop, no feedback from admin ban/dismiss decisions. The per-endpoint `RandomForestClassifier` *is* trained on real labeled data, but as a one-time offline run — the same script produces the same model every time; nothing here retrains automatically or incorporates this app's own traffic. "AI-powered" means "two static models as secondary signals," not an adaptive system.
+* **The per-endpoint model's features are a proxy, not a match.** Its training data (Kaggle) describes a different application's API graph. This app's own per-record analogues are structurally similar but not the same distribution — treat its output as a rough signal, not a calibrated probability. It's also dominated by two features (`num_users` + `num_sessions` carry ~71% of its decisions) — documented and printed as a warning by `train_endpoint_anomaly_model.py` on every retrain, so this can't get quietly oversold.
+* **All demo/benchmark traffic is synthetic.** Every number generated via `/simulate/*` and `benchmark.py` is self-generated, not validated against real-world API traffic. See `bola-benchmark/EXTERNAL_VALIDATION.md` for an independent-rerun protocol.
+* **`/reset` and `/simulate/*` stay unauthenticated in `DEMO_MODE`** (the default) so the dashboard's buttons work without login. `DEMO_MODE=false` gates both behind a `security_admin` JWT. They're also hardcoded to only ever touch the `demo` tenant's data — a customer's tenant is never affected by them.
+* **No token revocation.** A leaked JWT or API key stays valid until it expires/is manually invalidated — no blocklist or session-invalidation mechanism yet.
+* **The SDK isn't on PyPI yet** and only has a Python/FastAPI build — Express and Django-native SDKs don't exist. Integrating from another language means calling `/v1/authorize` directly over HTTP.
+* **`/audit-events` has no pagination** — returns the most recent 100 rows only.
+* **No live/hosted demo URL** exists at this time — `render.yaml` is ready to deploy but nothing is currently running permanently.
 
 ---
 
