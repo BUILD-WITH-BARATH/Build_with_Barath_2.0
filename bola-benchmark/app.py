@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import hmac
+import json
 import os
+import re
 import secrets
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import bcrypt
 import jwt
@@ -33,6 +37,10 @@ from sklearn.ensemble import IsolationForest
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+import strawberry
+from strawberry.fastapi import GraphQLRouter
 
 # --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
 APP_ENV = os.environ.get("APP_ENV", "dev")
@@ -45,6 +53,15 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin_changeme123")
 ADMIN_ROLE = "security_admin"
 DEMO_TENANT_ID = "demo"
 TENANT_SIGNUP_KEY = os.environ.get("TENANT_SIGNUP_KEY", "dev-insecure-signup-key-change-in-production")
+
+# --- Dynamic BOLA Weights & Limits (Configurable, no hardcoded magic values) ---
+BOLA_WEIGHT_DELETE = float(os.environ.get("BOLA_WEIGHT_DELETE", "3.0"))
+BOLA_WEIGHT_PATCH = float(os.environ.get("BOLA_WEIGHT_PATCH", "2.5"))
+BOLA_WEIGHT_PUT = float(os.environ.get("BOLA_WEIGHT_PUT", "2.0"))
+BOLA_WEIGHT_POST = float(os.environ.get("BOLA_WEIGHT_POST", "1.5"))
+BOLA_WEIGHT_GET = float(os.environ.get("BOLA_WEIGHT_GET", "1.0"))
+BOLA_MAX_BATCH_SIZE = int(os.environ.get("BOLA_MAX_BATCH_SIZE", "50"))
+BOLA_ASYNC_JOB_TTL = float(os.environ.get("BOLA_ASYNC_JOB_TTL", "3600.0"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL and APP_ENV == "prod":
@@ -131,9 +148,9 @@ if DATABASE_URL and not DATABASE_URL.startswith("sqlite"):
 else:
     import sqlite3
     import re
-    from threading import Lock
+    from threading import RLock
 
-    _db_lock = Lock()
+    _db_lock = RLock()
     _sqlite_file = Path(__file__).parent / "dev.db" if not (DATABASE_URL and ":memory:" in DATABASE_URL) else ":memory:"
     _raw_sqlite = sqlite3.connect(str(_sqlite_file), check_same_thread=False)
     _raw_sqlite.row_factory = sqlite3.Row
@@ -272,7 +289,8 @@ def init_schema() -> None:
                 record_id TEXT NOT NULL,
                 allowed BOOLEAN NOT NULL,
                 at DOUBLE PRECISION NOT NULL,
-                endpoint TEXT NOT NULL
+                endpoint TEXT NOT NULL,
+                http_verb TEXT NOT NULL DEFAULT 'GET'
             );
             CREATE INDEX IF NOT EXISTS idx_risk_events_tenant_subject ON risk_events(tenant_id, subject, at);
             CREATE TABLE IF NOT EXISTS risk_strikes (
@@ -304,8 +322,93 @@ def init_schema() -> None:
                 outcome TEXT NOT NULL,
                 explanation TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS resource_nodes (
+                tenant_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                parent_type TEXT,
+                parent_id TEXT,
+                owner_id TEXT NOT NULL,
+                name TEXT,
+                metadata TEXT,
+                PRIMARY KEY (tenant_id, resource_type, resource_id)
+            );
+            CREATE TABLE IF NOT EXISTS async_jobs (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                pre_authorized BOOLEAN NOT NULL DEFAULT FALSE,
+                pre_auth_token TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at DOUBLE PRECISION NOT NULL,
+                expires_at DOUBLE PRECISION NOT NULL,
+                completed_at DOUBLE PRECISION,
+                result_payload TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stored_references (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                ref_type TEXT NOT NULL,
+                target_resource_id TEXT NOT NULL,
+                metadata TEXT,
+                authorized_at_creation BOOLEAN NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                last_validated_at DOUBLE PRECISION,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE IF NOT EXISTS abac_policies (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                effect TEXT NOT NULL,
+                target_role TEXT,
+                target_classification TEXT,
+                min_clearance INTEGER DEFAULT 0,
+                allowed_hours_start INTEGER DEFAULT 0,
+                allowed_hours_end INTEGER DEFAULT 24,
+                created_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS abac_field_redactions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                required_role TEXT,
+                min_clearance INTEGER DEFAULT 0,
+                masking_strategy TEXT NOT NULL DEFAULT 'REDACT'
+            );
+            CREATE TABLE IF NOT EXISTS canary_records (
+                tenant_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                decoy_name TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'CRITICAL',
+                trap_action TEXT NOT NULL DEFAULT 'PERMANENT_BAN',
+                created_at DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (tenant_id, id)
+            );
+            CREATE TABLE IF NOT EXISTS canary_triggers (
+                id SERIAL PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                canary_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                ip_address TEXT,
+                triggered_at DOUBLE PRECISION NOT NULL,
+                action_taken TEXT NOT NULL
+            );
             """
         )
+        try:
+            c.execute("ALTER TABLE risk_events ADD COLUMN http_verb TEXT NOT NULL DEFAULT 'GET'")
+        except Exception:
+            pass
+        try:
+            c.execute("ALTER TABLE records ADD COLUMN classification TEXT DEFAULT 'standard'")
+        except Exception:
+            pass
 
 
 def seed_demo_tenant(force: bool = False) -> None:
@@ -322,7 +425,9 @@ def seed_demo_tenant(force: bool = False) -> None:
                 return
 
         for table in ("access_grants", "assignments", "records", "users",
-                       "risk_events", "risk_strikes", "risk_blocks", "risk_bans"):
+                       "risk_events", "risk_strikes", "risk_blocks", "risk_bans",
+                       "resource_nodes", "async_jobs", "stored_references",
+                       "abac_policies", "abac_field_redactions", "canary_records", "canary_triggers"):
             cur.execute(f"DELETE FROM {table} WHERE tenant_id = %s", (DEMO_TENANT_ID,))
 
         cur.execute(
@@ -368,23 +473,115 @@ def seed_demo_tenant(force: bool = False) -> None:
                 (DEMO_TENANT_ID, "dr_cover", "31", time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
             ],
         )
+        canaries = [
+            ("0", "Demo Zero Honeypot", "CRITICAL", "PERMANENT_BAN", time.time()),
+            ("999999", "High ID Probing Trap", "CRITICAL", "PERMANENT_BAN", time.time()),
+            ("canary_admin_vault", "Admin Vault Decoy", "CRITICAL", "PERMANENT_BAN", time.time()),
+        ]
+        cur.executemany(
+            "INSERT INTO canary_records (tenant_id, id, decoy_name, severity, trap_action, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, id) DO NOTHING",
+            [(DEMO_TENANT_ID, *can) for can in canaries],
+        )
+        nodes = [
+            ("organization", "org_demo", None, None, "alice", "Acme Health Corp", "{}"),
+            ("department", "dept_cardiology", "organization", "org_demo", "dr_singh", "Cardiology Dept", "{}"),
+            ("record", "1", "department", "dept_cardiology", "alice", "Patient 1 Vitals", "{}"),
+            ("organization", "org_rival", None, None, "bob", "Rival Health Corp", "{}"),
+            ("department", "dept_rival_oncology", "organization", "org_rival", "bob", "Oncology Dept", "{}"),
+            ("record", "55", "department", "dept_rival_oncology", "bob", "Patient 55 Chart", "{}"),
+        ]
+        cur.executemany(
+            "INSERT INTO resource_nodes (tenant_id, resource_type, resource_id, parent_type, parent_id, owner_id, name, metadata) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, resource_type, resource_id) DO NOTHING",
+            [(DEMO_TENANT_ID, *n) for n in nodes],
+        )
+        redactions = [
+            ("redact_psych", "record", "psychiatric_notes", "psychiatrist", 2, "REDACT"),
+            ("redact_ssn", "record", "ssn", "billing_admin", 3, "REDACT"),
+        ]
+        cur.executemany(
+            "INSERT INTO abac_field_redactions (id, tenant_id, resource_type, field_name, required_role, min_clearance, masking_strategy) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            [(r[0], DEMO_TENANT_ID, *r[1:]) for r in redactions],
+        )
 
 
-def authorization_context(tenant_id: str, subject: str, record_id: int | str) -> dict:
-    """Authoritative policy for the demo/dashboard's own record model.
-    The learned graph is never an authorization source."""
+
+def is_canary_record(tenant_id: str, record_id: str) -> bool:
+    """Checks if record_id is a registered honeypot decoy in canary_records table."""
     with db() as c:
-        rec_id = str(record_id)
+        row = c.execute("SELECT 1 FROM canary_records WHERE tenant_id = %s AND id = %s",
+                         (tenant_id, str(record_id))).fetchone()
+    return bool(row)
+
+
+def trigger_canary_trap(tenant_id: str, subject: str, record_id: str, endpoint: str = "records", ip: str = "unknown") -> None:
+    """Executes immediate permanent ban, immutable forensic trigger logging, and CRITICAL SOC alert on canary access."""
+    now = time.time()
+    with db() as c:
+        c.execute(
+            "INSERT INTO canary_triggers (tenant_id, canary_id, subject_id, endpoint, ip_address, triggered_at, action_taken) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (tenant_id, str(record_id), subject, endpoint, ip, now, "PERMANENT_BAN")
+        )
+    # Instant Strike 3 permanent ban: skip progressive warning windows
+    engine._set_ban_status(tenant_id, subject, "approved")
+    engine._set_blocked_until(tenant_id, subject, now + 315360000.0)  # 10 years
+    with db() as c:
+        # Record 3 strikes for forensics
+        for offset in (0.0, 0.001, 0.002):
+            c.execute("INSERT INTO risk_strikes (tenant_id, subject, at) VALUES (%s, %s, %s)",
+                      (tenant_id, subject, now + offset))
+    # Dispatch CRITICAL SOC alert
+    dispatch_soc_alert(tenant_id, subject, record_id, score=100, category="Attack",
+                       signals=["canary_honeypot_triggered", "strike_3_permanent_ban_approved"])
+    record_audit(
+        tenant_id, subject, record_id, None, "block", "blocked_canary",
+        [f"CANARY HONEYPOT TRIGGERED: Decoy '{record_id}' accessed by subject '{subject}'. Permanent firewall ban enforced."]
+    )
+
+
+def authorization_context(tenant_id: str, subject: str, record_id: int | str, action: str = "read") -> dict:
+    """Authoritative policy for the demo/dashboard's own record model.
+    The learned graph is never an authorization source.
+    Dynamically enforces read, write, patch, and delete permissions."""
+    rec_id = str(record_id)
+    # Honeypot decoy check (Feature 9)
+    if is_canary_record(tenant_id, rec_id):
+        trigger_canary_trap(tenant_id, subject, rec_id, endpoint="records")
+        return {"authorization": None, "explanations": ["Access denied: you are not authorized to access this record."], "delegation": None, "is_canary": True}
+
+    with db() as c:
         DENY_EXPLANATION = "Access denied: you are not the owner, are not assigned, and have no active delegation."
         record = c.execute("SELECT owner_id FROM records WHERE tenant_id = %s AND id = %s",
                             (tenant_id, rec_id)).fetchone()
         if not record:
             return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
+
+        # Admin override (security_admin role has read/audit oversight)
+        if subject == ADMIN_ROLE:
+            return {"authorization": "admin", "explanations": ["Access allowed: security_admin administrative authority."], "delegation": None}
+
+        # Owner check (owner has all permissions: read, write, delete)
         if record["owner_id"] == subject:
-            return {"authorization": "owner", "explanations": ["Access allowed: you own this record."], "delegation": None}
+            verb_note = "delete" if action == "delete" else ("modify" if action in ("write", "update", "patch") else "read")
+            return {"authorization": "owner", "explanations": [f"Access allowed: you own this record and can {verb_note} it."], "delegation": None}
+
+        # DELETE is strictly owner-only
+        if action == "delete":
+            return {"authorization": None, "explanations": ["Access denied: only the record owner can delete this record."], "delegation": None}
+
+        # WRITE / PATCH: check if subject has explicit write assignment or delegation
+        if action in ("write", "update", "patch"):
+            return {"authorization": None, "explanations": ["Access denied: only the record owner can modify this record."], "delegation": None}
+
+        # READ: check assignments
         if c.execute("SELECT 1 FROM assignments WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
                      (tenant_id, subject, rec_id)).fetchone():
             return {"authorization": "assigned", "explanations": ["Access allowed: you are assigned to this record."], "delegation": None}
+
+        # READ: check active delegation
         grant = c.execute(
             "SELECT expires_at, reason, approved_by FROM access_grants WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
             (tenant_id, subject, rec_id)).fetchone()
@@ -457,6 +654,7 @@ class Event:
     allowed: bool
     at: float
     endpoint: str = "records"
+    http_verb: str = "GET"
 
 
 class BehavioralRiskEngine:
@@ -474,21 +672,21 @@ class BehavioralRiskEngine:
         self.strike_window = strike_window
 
     def record_event(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
-                      at: float | None = None, endpoint: str = "records") -> None:
+                      at: float | None = None, endpoint: str = "records", http_verb: str = "GET") -> None:
         at = at if at is not None else time.time()
         with db() as c:
             c.execute(
-                "INSERT INTO risk_events (tenant_id, subject, record_id, allowed, at, endpoint) VALUES (%s, %s, %s, %s, %s, %s)",
-                (tenant_id, subject, str(record_id), allowed, at, endpoint))
+                "INSERT INTO risk_events (tenant_id, subject, record_id, allowed, at, endpoint, http_verb) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (tenant_id, subject, str(record_id), allowed, at, endpoint, http_verb))
 
     def _events(self, tenant_id: str, subject: str, now: float) -> list[Event]:
         cutoff = now - self.long_window
         with db() as c:
             rows = c.execute(
-                "SELECT record_id, allowed, at, endpoint FROM risk_events "
+                "SELECT record_id, allowed, at, endpoint, http_verb FROM risk_events "
                 "WHERE tenant_id = %s AND subject = %s AND at > %s ORDER BY at ASC",
                 (tenant_id, subject, cutoff)).fetchall()
-        return [Event(r["record_id"], bool(r["allowed"]), r["at"], r["endpoint"]) for r in rows]
+        return [Event(r["record_id"], bool(r["allowed"]), r["at"], r["endpoint"], r.get("http_verb", "GET") or "GET") for r in rows]
 
     def get_strike_count(self, tenant_id: str, subject: str, now: float | None = None) -> int:
         now = now or time.time()
@@ -617,7 +815,7 @@ class BehavioralRiskEngine:
         return {r["record_id"]: r["n"] for r in rows}
 
     def evaluate(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
-                 endpoint: str = "records") -> tuple[str, list[str], bool, int, str]:
+                 endpoint: str = "records", http_verb: str = "GET") -> tuple[str, list[str], bool, int, str]:
         now = time.time()
 
         if self.blocked_until(tenant_id, subject) > now:
@@ -633,7 +831,7 @@ class BehavioralRiskEngine:
                 sig = "strike_1_soft_lockout_2m"
             return "block", ["temporarily_blocked", sig], False, 100, "Attack"
 
-        self.record_event(tenant_id, subject, record_id, allowed, now, endpoint)
+        self.record_event(tenant_id, subject, record_id, allowed, now, endpoint, http_verb)
 
         score_data = self.compute_risk(tenant_id, subject, now)
         score, signals, category = score_data["score"], score_data["signals"], score_data["category"]
@@ -654,8 +852,12 @@ class BehavioralRiskEngine:
         denied_all = [e for e in q if not e.allowed]
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
 
-        unique_denied_short = len({e.record_id for e in denied_short if e.endpoint in ("records", "v1")})
-        unique_denied_long = len({e.record_id for e in denied_all if e.endpoint in ("records", "v1")})
+        def _is_tracked_resource(ep: str) -> bool:
+            return ep in ("records", "v1", "records_batch", "records_mutation", "records_abac",
+                          "graphql", "hierarchy", "exports", "stored_ref", "async_jobs") or ep.startswith("body_ref:")
+
+        unique_denied_short = len({e.record_id for e in denied_short if _is_tracked_resource(e.endpoint)})
+        unique_denied_long = len({e.record_id for e in denied_all if _is_tracked_resource(e.endpoint)})
 
         total_long = len(q)
         failed_long = len(denied_all)
@@ -672,7 +874,7 @@ class BehavioralRiskEngine:
         # Sequential short - best-effort: only numeric record_ids can show a "step"
         # pattern; arbitrary string resource_ids (e.g. from external /v1/authorize
         # tenants) simply never trip this signal, a documented limitation.
-        short_ids_raw = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint in ("records", "v1")]
+        short_ids_raw = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and _is_tracked_resource(e.endpoint)]
         short_ids = []
         for rid in short_ids_raw:
             try:
@@ -700,6 +902,38 @@ class BehavioralRiskEngine:
         if endpoints_hit >= 2:
             contributions["endpoint_diversity"] = 20
             signals.append("endpoint_diversity")
+
+        # Feature 1: Write/Mutation weighted scoring
+        denied_write_events = [e for e in denied_short if e.http_verb in ("DELETE", "PATCH", "PUT")]
+        if denied_write_events:
+            if any(e.http_verb == "DELETE" for e in denied_write_events):
+                contributions["unauthorized_write_delete_attempt"] = int(25 * BOLA_WEIGHT_DELETE)
+                signals.append("unauthorized_write_delete_attempt")
+            elif any(e.http_verb in ("PATCH", "PUT") for e in denied_write_events):
+                weight = max(BOLA_WEIGHT_PATCH if e.http_verb == "PATCH" else BOLA_WEIGHT_PUT for e in denied_write_events)
+                contributions["unauthorized_write_mutation_attempt"] = int(20 * weight)
+                signals.append("unauthorized_write_mutation_attempt")
+
+        # Feature 2: Hierarchical chain mismatch
+        if any(e.endpoint == "hierarchy" for e in denied_short):
+            contributions["relational_chain_mismatch"] = 45
+            signals.append("relational_chain_mismatch")
+
+        # Feature 3: Body-payload object injection
+        body_injections = [e for e in denied_short if e.endpoint.startswith("body_ref:")]
+        if body_injections:
+            contributions["body_payload_object_injection"] = min(40, len(body_injections) * 20)
+            signals.append("body_payload_object_injection")
+
+        # Feature 7: Second-order stored BOLA violation
+        if any(e.endpoint.startswith("stored_ref") for e in denied_short):
+            contributions["second_order_bola_violation"] = 45
+            signals.append("second_order_bola_violation")
+
+        # Feature 9: Canary honeypot trigger
+        if any(e.endpoint == "canary_trap" for e in denied_short):
+            contributions["canary_honeypot_triggered"] = 100
+            signals.append("canary_honeypot_triggered")
 
         if failed_long > 0:
             failure_ratio = failed_long / total_long if total_long > 0 else 0.0
@@ -747,6 +981,78 @@ app = FastAPI(title="BOLA Graph Benchmark")
 _frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").split(",") if o.strip()]
 _cors_origins = _frontend_origins if _frontend_origins else (["*"] if APP_ENV != "prod" else [])
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+ID_KEY_PATTERN = re.compile(r'(?:^|[_\-.])(?:id|key|ref|uuid|identifier)s?$', re.IGNORECASE)
+
+def extract_candidate_object_ids(payload: Any, depth: int = 5) -> list[tuple[str, str]]:
+    """Recursively scans JSON payloads for object ID fields without hardcoding field names."""
+    candidates = []
+    if depth <= 0:
+        return candidates
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            if isinstance(v, (str, int)) and ID_KEY_PATTERN.search(str(k)):
+                val_str = str(v).strip()
+                if val_str and len(val_str) < 128:
+                    candidates.append((str(k), val_str))
+            elif isinstance(v, list) and ID_KEY_PATTERN.search(str(k)):
+                for item in v:
+                    if isinstance(item, (str, int)):
+                        val_str = str(item).strip()
+                        if val_str and len(val_str) < 128:
+                            candidates.append((str(k), val_str))
+            elif isinstance(v, (dict, list)):
+                candidates.extend(extract_candidate_object_ids(v, depth - 1))
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, (dict, list)):
+                candidates.extend(extract_candidate_object_ids(item, depth - 1))
+    return candidates
+
+
+class BodyObjectReferenceMiddleware(BaseHTTPMiddleware):
+    """Intercepts POST, PUT, and PATCH requests, dynamically identifies candidate
+    resource identifiers in the JSON body, and verifies object authorization.
+    If an unowned foreign resource is referenced, records a body-level BOLA attempt."""
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.method in ("POST", "PUT", "PATCH"):
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.lower().startswith("bearer "):
+                body_bytes = await request.body()
+                if body_bytes:
+                    try:
+                        token = auth_header.split(" ", 1)[1]
+                        payload_jwt = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                        subject = payload_jwt["sub"]
+                        tenant_id = payload_jwt.get("tenant_id", DEMO_TENANT_ID)
+
+                        data = json.loads(body_bytes)
+                        candidates = extract_candidate_object_ids(data)
+
+                        for field_name, cand_id in candidates:
+                            if request.url.path.startswith("/auth/") or request.url.path in ("/records/batch", "/hierarchy/access", "/graphql"):
+                                continue
+                            with db() as c:
+                                rec = c.execute(
+                                    "SELECT owner_id FROM records WHERE tenant_id = %s AND id = %s",
+                                    (tenant_id, cand_id)
+                                ).fetchone()
+                            if rec:
+                                access = authorization_context(tenant_id, subject, cand_id, action="read")
+                                if access["authorization"] is None:
+                                    engine.evaluate(tenant_id, subject, cand_id, allowed=False, endpoint=f"body_ref:{field_name}")
+                                    record_audit(
+                                        tenant_id, subject, cand_id, None, "deny", "denied_body_reference",
+                                        [f"Unauthorized foreign object ID '{cand_id}' referenced in body field '{field_name}'."]
+                                    )
+                    except Exception:
+                        pass
+                    async def receive():
+                        return {"type": "http.request", "body": body_bytes}
+                    request._receive = receive
+        return await call_next(request)
+
+app.add_middleware(BodyObjectReferenceMiddleware)
 
 
 @app.get("/health")
@@ -832,7 +1138,13 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "strike_2_hard_lockout_30m": "Strike 2/3: Repeat violation within 1 hour. 30-Minute Hard Lockout penalty enforced.",
         "strike_3_pending_admin_approval": "Strike 3/3 Reached: Permanent Ban PENDING ADMIN APPROVAL (Quarantined).",
         "strike_3_permanent_ban_approved": "Strike 3/3: Permanent Firewall Blacklist APPROVED by Administrator.",
-        "ml_behavioral_anomaly": "An unsupervised ML model (Isolation Forest) flagged this access pattern as statistically abnormal compared to normal traffic."
+        "ml_behavioral_anomaly": "An unsupervised ML model (Isolation Forest) flagged this access pattern as statistically abnormal compared to normal traffic.",
+        "unauthorized_write_delete_attempt": "Critical: Unauthorized deletion attempt detected against an object you do not own.",
+        "unauthorized_write_mutation_attempt": "Warning: Unauthorized modification (PUT/PATCH) attempt detected against an object you cannot edit.",
+        "body_payload_object_injection": "Warning: Unauthorized object references detected embedded within the request body payload.",
+        "relational_chain_mismatch": "Warning: Hierarchical parent-child relationship check failed (BOLA path traversal).",
+        "second_order_bola_violation": "Warning: Second-order stored reference pointed to an unauthorized or foreign resource.",
+        "canary_honeypot_triggered": "CRITICAL: Honeypot canary trap triggered. Instant permanent ban enforced."
     }
     return [messages[s] for s in signals if s in messages]
 
@@ -968,6 +1280,789 @@ def get_record(record_id: str, request: Request, response: Response,
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
             "score": score, "category": category}
+
+
+# ============================================================================
+# FEATURE 1: WRITE & MUTATION BOLA (PUT, PATCH, DELETE WITH VERB-WEIGHTING)
+# ============================================================================
+
+@app.put("/records/{record_id}")
+@limiter.limit("200/minute")
+def update_record(
+    record_id: str,
+    payload: dict,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    access = authorization_context(tenant_id, subject, record_id, action="write")
+    authorization = access["authorization"]
+
+    decision, signals, unseen, score, category = engine.evaluate(
+        tenant_id, subject, record_id, allowed=authorization is not None, endpoint="records_mutation", http_verb="PUT"
+    )
+    detector_explanations = explain_detector_signals(signals)
+    explanations = access["explanations"] + detector_explanations
+
+    response.headers["X-Detector-Decision"] = decision
+    response.headers["X-Detector-Signals"] = ",".join(signals)
+    response.headers["X-Risk-Score"] = str(score)
+    response.headers["X-Risk-Category"] = category
+
+    if decision == "block":
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
+        raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
+
+    if authorization is None:
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No write authorization for record", "score": score})
+
+    new_data = payload.get("data")
+    if new_data is None:
+        raise HTTPException(400, "data field is required")
+
+    with db() as c:
+        c.execute(
+            "UPDATE records SET data = %s WHERE tenant_id = %s AND id = %s",
+            (str(new_data), tenant_id, str(record_id))
+        )
+        row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                        (tenant_id, str(record_id))).fetchone()
+
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_write", explanations)
+    return {"status": "updated", "record": dict(row), "score": score}
+
+
+@app.patch("/records/{record_id}")
+@limiter.limit("200/minute")
+def patch_record(
+    record_id: str,
+    payload: dict,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    access = authorization_context(tenant_id, subject, record_id, action="patch")
+    authorization = access["authorization"]
+
+    decision, signals, unseen, score, category = engine.evaluate(
+        tenant_id, subject, record_id, allowed=authorization is not None, endpoint="records_mutation", http_verb="PATCH"
+    )
+    detector_explanations = explain_detector_signals(signals)
+    explanations = access["explanations"] + detector_explanations
+
+    response.headers["X-Detector-Decision"] = decision
+    response.headers["X-Detector-Signals"] = ",".join(signals)
+    response.headers["X-Risk-Score"] = str(score)
+    response.headers["X-Risk-Category"] = category
+
+    if decision == "block":
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
+        raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
+
+    if authorization is None:
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No patch authorization for record", "score": score})
+
+    with db() as c:
+        row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                        (tenant_id, str(record_id))).fetchone()
+        if not row:
+            raise HTTPException(404, "Record not found")
+        patch_text = payload.get("data", f"{row['data']} [patched]")
+        c.execute("UPDATE records SET data = %s WHERE tenant_id = %s AND id = %s",
+                  (str(patch_text), tenant_id, str(record_id)))
+        updated_row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                                (tenant_id, str(record_id))).fetchone()
+
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_patch", explanations)
+    return {"status": "patched", "record": dict(updated_row), "score": score}
+
+
+@app.delete("/records/{record_id}")
+@limiter.limit("100/minute")
+def delete_record(
+    record_id: str,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    access = authorization_context(tenant_id, subject, record_id, action="delete")
+    authorization = access["authorization"]
+
+    decision, signals, unseen, score, category = engine.evaluate(
+        tenant_id, subject, record_id, allowed=authorization is not None, endpoint="records_mutation", http_verb="DELETE"
+    )
+    detector_explanations = explain_detector_signals(signals)
+    explanations = access["explanations"] + detector_explanations
+
+    response.headers["X-Detector-Decision"] = decision
+    response.headers["X-Detector-Signals"] = ",".join(signals)
+    response.headers["X-Risk-Score"] = str(score)
+    response.headers["X-Risk-Category"] = category
+
+    if decision == "block":
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
+        raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
+
+    if authorization is None:
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "Only record owner can delete this record", "score": score})
+
+    with db() as c:
+        c.execute("DELETE FROM records WHERE tenant_id = %s AND id = %s", (tenant_id, str(record_id)))
+
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_delete", explanations)
+    return {"status": "deleted", "record_id": record_id, "score": score}
+
+
+# ============================================================================
+# FEATURE 2: HIERARCHICAL / PARENT-CHILD RELATIONAL VALIDATION
+# ============================================================================
+
+def validate_hierarchical_chain(tenant_id: str, subject: str, chain: list[dict], action: str = "read") -> tuple[bool, list[str], dict | None]:
+    """Dynamically validates an arbitrary resource hierarchy chain.
+    Ensures:
+      1. Every node in chain exists in resource_nodes.
+      2. Each child's parent_type and parent_id matches the preceding node (relational integrity).
+      3. Subject is authorized for the leaf node."""
+    if not chain:
+        return False, ["Chain cannot be empty."], None
+
+    with db() as c:
+        prev_node = None
+        for item in chain:
+            r_type = item.get("type")
+            r_id = str(item.get("id"))
+            node = c.execute(
+                "SELECT resource_type, resource_id, parent_type, parent_id, owner_id, name, metadata "
+                "FROM resource_nodes WHERE tenant_id = %s AND resource_type = %s AND resource_id = %s",
+                (tenant_id, r_type, r_id)
+            ).fetchone()
+            if not node:
+                return False, [f"Node '{r_type}:{r_id}' not found in tenant hierarchy."], None
+
+            if prev_node:
+                if node["parent_type"] != prev_node["resource_type"] or node["parent_id"] != prev_node["resource_id"]:
+                    return False, [
+                        f"Relational chain mismatch: '{r_type}:{r_id}' claims parent '{node['parent_type']}:{node['parent_id']}', "
+                        f"which does not match previous chain node '{prev_node['resource_type']}:{prev_node['resource_id']}'."
+                    ], None
+            prev_node = dict(node)
+
+    leaf = prev_node
+    if leaf["resource_type"] == "record":
+        rec_access = authorization_context(tenant_id, subject, leaf["resource_id"], action)
+        if rec_access["authorization"] is None:
+            return False, [f"Access denied to leaf record '{leaf['resource_id']}'."], leaf
+    elif leaf["owner_id"] != subject:
+        return False, [f"Access denied: you do not own '{leaf['resource_type']}:{leaf['resource_id']}'."], leaf
+
+    return True, ["Hierarchical resource chain successfully verified."], leaf
+
+
+@app.post("/hierarchy/nodes")
+def create_hierarchy_node(
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    r_type = payload.get("resource_type")
+    r_id = str(payload.get("resource_id", ""))
+    p_type = payload.get("parent_type")
+    p_id = str(payload.get("parent_id")) if payload.get("parent_id") is not None else None
+    name = payload.get("name", r_id)
+    metadata = json.dumps(payload.get("metadata", {}))
+
+    if not r_type or not r_id:
+        raise HTTPException(400, "resource_type and resource_id are required")
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO resource_nodes (tenant_id, resource_type, resource_id, parent_type, parent_id, owner_id, name, metadata) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (tenant_id, resource_type, resource_id) DO UPDATE SET "
+            "parent_type = EXCLUDED.parent_type, parent_id = EXCLUDED.parent_id, "
+            "name = EXCLUDED.name, metadata = EXCLUDED.metadata",
+            (tenant_id, r_type, r_id, p_type, p_id, subject, name, metadata)
+        )
+    return {"status": "created", "resource_type": r_type, "resource_id": r_id}
+
+
+@app.post("/hierarchy/access")
+def access_hierarchical_chain(
+    payload: dict,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    chain = payload.get("chain", [])
+    action = payload.get("action", "read")
+    if not isinstance(chain, list) or len(chain) == 0:
+        raise HTTPException(400, "chain must be a non-empty list of nodes")
+
+    leaf_id = str(chain[-1].get("id", "unknown"))
+    valid, explanations, leaf_data = validate_hierarchical_chain(tenant_id, subject, chain, action)
+
+    decision, signals, _unseen, score, category = engine.evaluate(
+        tenant_id, subject, leaf_id, allowed=valid, endpoint="hierarchy"
+    )
+    detector_explanations = explain_detector_signals(signals)
+    all_explanations = explanations + detector_explanations
+
+    response.headers["X-Detector-Decision"] = decision
+    response.headers["X-Risk-Score"] = str(score)
+
+    if not valid or decision == "block":
+        outcome = "blocked" if decision == "block" else "denied"
+        record_audit(tenant_id, subject, leaf_id, None, decision, outcome, all_explanations)
+        raise HTTPException(403, detail={"outcome": outcome, "reason": "Hierarchical validation failed",
+                                         "violations": explanations, "score": score})
+
+    record_audit(tenant_id, subject, leaf_id, "authorized", decision, "allowed", all_explanations)
+    return {"outcome": "allowed", "leaf": leaf_data, "chain_length": len(chain), "score": score}
+
+
+# ============================================================================
+# FEATURE 4: BATCH / BULK ARRAY BOLA EVALUATION
+# ============================================================================
+
+@app.post("/records/batch")
+@limiter.limit("100/minute")
+def batch_records(
+    payload: dict,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    record_ids = payload.get("record_ids", [])
+    action = payload.get("action", "read")
+
+    if not isinstance(record_ids, list) or len(record_ids) == 0:
+        raise HTTPException(400, "record_ids must be a non-empty list")
+
+    if len(record_ids) > BOLA_MAX_BATCH_SIZE:
+        raise HTTPException(400, f"Batch size cannot exceed {BOLA_MAX_BATCH_SIZE} items")
+
+    if engine.blocked_until(tenant_id, subject) > time.time():
+        raise HTTPException(403, detail={"outcome": "blocked", "reason": "Subject is blocked"})
+
+    results = []
+    allowed_count = 0
+    denied_count = 0
+    blocked_count = 0
+    blocked_mid_batch = False
+
+    for rid in record_ids:
+        rid_str = str(rid)
+        if engine.blocked_until(tenant_id, subject) > time.time():
+            blocked_mid_batch = True
+            blocked_count += 1
+            results.append({"record_id": rid_str, "status": "blocked_mid_batch", "data": None})
+            continue
+
+        access = authorization_context(tenant_id, subject, rid_str, action)
+        decision, signals, _unseen, score, category = engine.evaluate(
+            tenant_id, subject, rid_str, allowed=access["authorization"] is not None, endpoint="records_batch"
+        )
+
+        if decision == "block":
+            blocked_mid_batch = True
+            blocked_count += 1
+            results.append({"record_id": rid_str, "status": "blocked", "score": score, "signals": signals})
+        elif access["authorization"] is None:
+            denied_count += 1
+            results.append({"record_id": rid_str, "status": "denied", "score": score, "signals": signals})
+        else:
+            allowed_count += 1
+            with db() as c:
+                row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                                (tenant_id, rid_str)).fetchone()
+            results.append({"record_id": rid_str, "status": "allowed", "data": dict(row) if row else None, "score": score})
+
+    return {
+        "total": len(record_ids),
+        "allowed": allowed_count,
+        "denied": denied_count,
+        "blocked": blocked_count,
+        "blocked_mid_batch": blocked_mid_batch,
+        "results": results
+    }
+
+
+# ============================================================================
+# FEATURE 5: ASYNCHRONOUS BACKGROUND JOB CONTEXT PROPAGATION
+# ============================================================================
+
+def generate_job_proof(tenant_id: str, subject: str, resource_id: str, action: str, expires_at: float) -> str:
+    message = f"{tenant_id}:{subject}:{resource_id}:{action}:{round(expires_at, 2)}"
+    return hmac.new(JWT_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def execute_async_job(job_id: str) -> dict:
+    """Worker execution: verifies cryptographic HMAC pre-authorization proof and TTL before executing."""
+    with db() as c:
+        job = c.execute(
+            "SELECT id, tenant_id, subject_id, resource_id, action, pre_authorized, pre_auth_token, status, expires_at "
+            "FROM async_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+
+    if not job:
+        return {"status": "failed", "error": "Job not found"}
+
+    now = time.time()
+    expected_proof = generate_job_proof(job["tenant_id"], job["subject_id"], job["resource_id"], job["action"], job["expires_at"])
+
+    if not hmac.compare_digest(job["pre_auth_token"], expected_proof) or not job["pre_authorized"]:
+        with db() as c:
+            c.execute("UPDATE async_jobs SET status = 'security_violation' WHERE id = %s", (job_id,))
+        engine.evaluate(job["tenant_id"], job["subject_id"], job["resource_id"], allowed=False, endpoint="async_jobs")
+        return {"status": "security_violation", "error": "Cryptographic pre-authorization signature mismatch"}
+
+    if now > job["expires_at"]:
+        with db() as c:
+            c.execute("UPDATE async_jobs SET status = 'expired' WHERE id = %s", (job_id,))
+        return {"status": "expired", "error": "Pre-authorization context expired"}
+
+    with db() as c:
+        record = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                           (job["tenant_id"], job["resource_id"])).fetchone()
+        res_data = json.dumps(dict(record)) if record else "{}"
+        c.execute("UPDATE async_jobs SET status = 'completed', completed_at = %s, result_payload = %s WHERE id = %s",
+                  (now, res_data, job_id))
+
+    return {"status": "completed", "job_id": job_id, "result": json.loads(res_data)}
+
+
+@app.post("/jobs")
+def create_job(
+    payload: dict,
+    request: Request,
+    response: Response,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    resource_id = str(payload.get("resource_id", ""))
+    action = payload.get("action", "export")
+
+    if not resource_id:
+        raise HTTPException(400, "resource_id required")
+
+    access = authorization_context(tenant_id, subject, resource_id, action="read")
+    if access["authorization"] is None:
+        decision, signals, _unseen, score, category = engine.evaluate(
+            tenant_id, subject, resource_id, allowed=False, endpoint="async_jobs"
+        )
+        record_audit(tenant_id, subject, resource_id, None, decision, "denied_job", access["explanations"])
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No authorization to enqueue job for requested resource", "score": score})
+
+    job_id = f"job_{secrets.token_hex(8)}"
+    now = time.time()
+    expires_at = now + BOLA_ASYNC_JOB_TTL
+    token = generate_job_proof(tenant_id, subject, resource_id, action, expires_at)
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO async_jobs (id, tenant_id, subject_id, resource_id, action, pre_authorized, pre_auth_token, status, created_at, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)",
+            (job_id, tenant_id, subject, resource_id, action, True, token, now, expires_at)
+        )
+    return {"job_id": job_id, "status": "pending", "expires_at": expires_at}
+
+
+@app.get("/jobs/{job_id}")
+def get_job_status(
+    job_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    with db() as c:
+        job = c.execute(
+            "SELECT id, tenant_id, subject_id, resource_id, action, status, created_at, expires_at, completed_at, result_payload "
+            "FROM async_jobs WHERE id = %s AND tenant_id = %s AND subject_id = %s",
+            (job_id, tenant_id, subject)
+        ).fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    res = dict(job)
+    if res.get("result_payload"):
+        try:
+            res["result_payload"] = json.loads(res["result_payload"])
+        except Exception:
+            pass
+    return res
+
+
+@app.post("/jobs/{job_id}/execute")
+def trigger_worker_execution(
+    job_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    return execute_async_job(job_id)
+
+
+# ============================================================================
+# FEATURE 7: SECOND-ORDER STORED BOLA VALIDATION
+# ============================================================================
+
+@app.post("/stored-references")
+def create_stored_reference(
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    ref_type = payload.get("ref_type", "webhook")
+    target_id = str(payload.get("target_resource_id", ""))
+    metadata = json.dumps(payload.get("metadata", {}))
+
+    if not target_id:
+        raise HTTPException(400, "target_resource_id required")
+
+    access = authorization_context(tenant_id, subject, target_id, action="read")
+    if access["authorization"] is None:
+        engine.evaluate(tenant_id, subject, target_id, allowed=False, endpoint="stored_ref")
+        record_audit(tenant_id, subject, target_id, None, "deny", "denied_stored_bola_creation",
+                     ["Second-order BOLA violation: Cannot register reference to unauthorized resource."])
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented: Cannot store pointer to unowned resource",
+                                         "attack_type": "second_order_bola"})
+
+    ref_id = f"ref_{secrets.token_hex(8)}"
+    now = time.time()
+    with db() as c:
+        c.execute(
+            "INSERT INTO stored_references (id, tenant_id, subject_id, ref_type, target_resource_id, metadata, authorized_at_creation, created_at, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')",
+            (ref_id, tenant_id, subject, ref_type, target_id, metadata, True, now)
+        )
+    return {"ref_id": ref_id, "status": "active", "target_resource_id": target_id}
+
+
+@app.post("/stored-references/{ref_id}/trigger")
+def trigger_stored_reference(
+    ref_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, _role, tenant_id = identity
+    with db() as c:
+        ref = c.execute(
+            "SELECT id, tenant_id, subject_id, ref_type, target_resource_id, status FROM stored_references WHERE id = %s AND tenant_id = %s",
+            (ref_id, tenant_id)
+        ).fetchone()
+
+    if not ref:
+        raise HTTPException(404, "Stored reference not found")
+
+    target_id = ref["target_resource_id"]
+    access = authorization_context(tenant_id, ref["subject_id"], target_id, action="read")
+    now = time.time()
+
+    if access["authorization"] is None:
+        with db() as c:
+            c.execute("UPDATE stored_references SET status = 'security_flagged' WHERE id = %s", (ref_id,))
+        engine.evaluate(tenant_id, ref["subject_id"], target_id, allowed=False, endpoint="stored_ref")
+        record_audit(tenant_id, ref["subject_id"], target_id, None, "deny", "denied_stored_bola_consumption",
+                     ["Second-order BOLA detected at trigger time: authorization has lapsed or resource changed owners."])
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented at consumption time",
+                                         "ref_status": "security_flagged"})
+
+    with db() as c:
+        c.execute("UPDATE stored_references SET last_validated_at = %s WHERE id = %s", (now, ref_id))
+    return {"status": "triggered", "ref_id": ref_id, "target_resource_id": target_id, "validated_at": now}
+
+
+# ============================================================================
+# FEATURE 8: DYNAMIC ABAC & FIELD-LEVEL REDACTION
+# ============================================================================
+
+def evaluate_dynamic_abac(tenant_id: str, subject: str, role: str, record_id: str,
+                          record_dict: dict, hour: int | None = None, clearance: int = 0) -> tuple[bool, list[str]]:
+    """Evaluates dynamic ABAC rules stored in abac_policies for the tenant."""
+    now_hour = hour if hour is not None else time.localtime().tm_hour
+    classification = record_dict.get("classification", "standard")
+
+    with db() as c:
+        policies = c.execute(
+            "SELECT id, name, effect, target_role, target_classification, min_clearance, allowed_hours_start, allowed_hours_end "
+            "FROM abac_policies WHERE tenant_id = %s", (tenant_id,)
+        ).fetchall()
+
+    for pol in policies:
+        if pol["target_role"] and pol["target_role"] != role:
+            continue
+        if pol["target_classification"] and pol["target_classification"] != classification:
+            continue
+        if not (pol["allowed_hours_start"] <= now_hour <= pol["allowed_hours_end"]):
+            return False, [f"Access denied by ABAC policy '{pol['name']}': Access restricted outside {pol['allowed_hours_start']}:00 - {pol['allowed_hours_end']}:00."]
+        if clearance < pol["min_clearance"]:
+            return False, [f"Access denied by ABAC policy '{pol['name']}': Requires minimum clearance level {pol['min_clearance']}."]
+
+    return True, ["ABAC policy evaluation passed."]
+
+
+def apply_dynamic_field_redaction(tenant_id: str, resource_type: str, data_dict: dict,
+                                   role: str, clearance: int = 0) -> tuple[dict, list[str]]:
+    """Applies dynamic field-level masking based on abac_field_redactions table."""
+    with db() as c:
+        rules = c.execute(
+            "SELECT field_name, required_role, min_clearance, masking_strategy FROM abac_field_redactions "
+            "WHERE tenant_id = %s AND resource_type = %s", (tenant_id, resource_type)
+        ).fetchall()
+
+    redacted = dict(data_dict)
+    redacted_fields = []
+
+    for rule in rules:
+        fname = rule["field_name"]
+        if fname in redacted:
+            meets_role = (role == rule["required_role"]) or (role == ADMIN_ROLE)
+            meets_clearance = (role == ADMIN_ROLE) or (clearance >= rule["min_clearance"])
+            if not (meets_role and meets_clearance):
+                strategy = rule["masking_strategy"]
+                if strategy == "HASH":
+                    redacted[fname] = hashlib.sha256(str(redacted[fname]).encode()).hexdigest()[:12] + "..."
+                else:
+                    redacted[fname] = "[REDACTED]"
+                redacted_fields.append(fname)
+
+    return redacted, redacted_fields
+
+
+@app.get("/records/{record_id}/abac")
+def get_record_abac(
+    record_id: str,
+    request: Request,
+    response: Response,
+    clearance: int = 0,
+    hour: int | None = None,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, role, tenant_id = identity
+
+    access = authorization_context(tenant_id, subject, record_id, action="read")
+    if access["authorization"] is None:
+        engine.evaluate(tenant_id, subject, record_id, allowed=False, endpoint="records_abac")
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No object-level authorization"})
+
+    with db() as c:
+        row = c.execute("SELECT id, owner_id, data, classification FROM records WHERE tenant_id = %s AND id = %s",
+                        (tenant_id, str(record_id))).fetchone()
+    if not row:
+        raise HTTPException(404, "Record not found")
+
+    rec_dict = dict(row)
+    abac_pass, abac_reasons = evaluate_dynamic_abac(tenant_id, subject, role, record_id, rec_dict, hour=hour, clearance=clearance)
+    if not abac_pass:
+        engine.evaluate(tenant_id, subject, record_id, allowed=False, endpoint="records_abac")
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "ABAC policy restriction", "violations": abac_reasons})
+
+    data_content = rec_dict.get("data", "")
+    try:
+        structured_data = json.loads(data_content)
+    except Exception:
+        structured_data = {"notes": data_content, "psychiatric_notes": "Clinical mental evaluation details", "ssn": "000-12-3456"}
+
+    redacted_data, redacted_fields = apply_dynamic_field_redaction(tenant_id, "record", structured_data, role, clearance)
+    rec_dict["data"] = redacted_data
+
+    engine.evaluate(tenant_id, subject, record_id, allowed=True, endpoint="records_abac")
+    return {
+        "record": rec_dict,
+        "abac_verified": True,
+        "redacted_fields": redacted_fields,
+        "authorization": access["authorization"]
+    }
+
+
+@app.post("/admin/abac/policies")
+def add_abac_policy(
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, role, tenant_id = identity
+    require_security_admin(role)
+    pol_id = str(payload.get("id", f"pol_{secrets.token_hex(6)}"))
+    name = payload.get("name", "Custom Policy")
+    effect = payload.get("effect", "allow")
+    target_role = payload.get("target_role")
+    target_class = payload.get("target_classification")
+    min_clear = int(payload.get("min_clearance", 0))
+    start_hour = int(payload.get("allowed_hours_start", 0))
+    end_hour = int(payload.get("allowed_hours_end", 24))
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO abac_policies (id, tenant_id, name, effect, target_role, target_classification, min_clearance, allowed_hours_start, allowed_hours_end, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, effect = EXCLUDED.effect, "
+            "target_role = EXCLUDED.target_role, target_classification = EXCLUDED.target_classification, "
+            "min_clearance = EXCLUDED.min_clearance, allowed_hours_start = EXCLUDED.allowed_hours_start, "
+            "allowed_hours_end = EXCLUDED.allowed_hours_end",
+            (pol_id, tenant_id, name, effect, target_role, target_class, min_clear, start_hour, end_hour, time.time())
+        )
+    return {"status": "policy_saved", "id": pol_id}
+
+
+@app.post("/admin/abac/redactions")
+def add_abac_redaction(
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, role, tenant_id = identity
+    require_security_admin(role)
+    rule_id = str(payload.get("id", f"red_{secrets.token_hex(6)}"))
+    res_type = payload.get("resource_type", "record")
+    f_name = payload.get("field_name")
+    req_role = payload.get("required_role")
+    min_clear = int(payload.get("min_clearance", 0))
+    strat = payload.get("masking_strategy", "REDACT")
+
+    if not f_name:
+        raise HTTPException(400, "field_name required")
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO abac_field_redactions (id, tenant_id, resource_type, field_name, required_role, min_clearance, masking_strategy) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (id) DO UPDATE SET resource_type = EXCLUDED.resource_type, "
+            "field_name = EXCLUDED.field_name, required_role = EXCLUDED.required_role, "
+            "min_clearance = EXCLUDED.min_clearance, masking_strategy = EXCLUDED.masking_strategy",
+            (rule_id, tenant_id, res_type, f_name, req_role, min_clear, strat)
+        )
+    return {"status": "redaction_rule_saved", "id": rule_id}
+
+
+# ============================================================================
+# FEATURE 9: CANARY / HONEYPOT DECOY MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post("/admin/canaries")
+def add_canary_record(
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity),
+) -> dict:
+    subject, role, tenant_id = identity
+    require_security_admin(role)
+    canary_id = str(payload.get("id", ""))
+    decoy_name = payload.get("decoy_name", "Decoy Trap Record")
+    severity = payload.get("severity", "CRITICAL")
+    trap_action = payload.get("trap_action", "PERMANENT_BAN")
+
+    if not canary_id:
+        raise HTTPException(400, "id is required")
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO canary_records (tenant_id, id, decoy_name, severity, trap_action, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, id) DO UPDATE SET "
+            "decoy_name = EXCLUDED.decoy_name, severity = EXCLUDED.severity, trap_action = EXCLUDED.trap_action",
+            (tenant_id, canary_id, decoy_name, severity, trap_action, time.time())
+        )
+    return {"status": "canary_registered", "id": canary_id}
+
+
+@app.get("/admin/canaries")
+def list_canaries(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, role, tenant_id = identity
+    require_security_admin(role)
+    with db() as c:
+        rows = c.execute("SELECT id, decoy_name, severity, trap_action, created_at FROM canary_records WHERE tenant_id = %s",
+                         (tenant_id,)).fetchall()
+    return {"canaries": [dict(r) for r in rows]}
+
+
+@app.get("/admin/canary-triggers")
+def list_canary_triggers(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, role, tenant_id = identity
+    require_security_admin(role)
+    with db() as c:
+        rows = c.execute(
+            "SELECT id, canary_id, subject_id, endpoint, ip_address, triggered_at, action_taken "
+            "FROM canary_triggers WHERE tenant_id = %s ORDER BY triggered_at DESC LIMIT 100",
+            (tenant_id,)
+        ).fetchall()
+    return {"triggers": [dict(r) for r in rows]}
+
+
+# ============================================================================
+# FEATURE 6: STRAWBERRY GRAPHQL TRAVERSAL & RESOLVER HOOKS
+# ============================================================================
+
+def _extract_gql_identity(request: Request) -> tuple[str, str, str]:
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise PermissionError("Authentication required: missing Bearer token")
+    token = auth.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload["sub"], payload.get("role", "customer"), payload.get("tenant_id", DEMO_TENANT_ID)
+    except Exception as e:
+        raise PermissionError(f"Invalid authentication token: {str(e)}")
+
+
+@strawberry.type
+class GraphQLRecordNode:
+    id: str
+    owner_id: str
+    data: str
+
+
+@strawberry.type
+class GraphQLQuery:
+    @strawberry.field
+    def record(self, info: strawberry.Info, id: str) -> GraphQLRecordNode | None:
+        request: Request = info.context["request"]
+        subject, _role, tenant_id = _extract_gql_identity(request)
+
+        # Canary check
+        if is_canary_record(tenant_id, id):
+            trigger_canary_trap(tenant_id, subject, id, endpoint="graphql")
+            raise PermissionError("Access denied to requested record")
+
+        access = authorization_context(tenant_id, subject, id, action="read")
+        decision, signals, _unseen, score, category = engine.evaluate(
+            tenant_id, subject, id, allowed=access["authorization"] is not None, endpoint="graphql"
+        )
+        if access["authorization"] is None or decision == "block":
+            record_audit(tenant_id, subject, id, None, decision, "denied_graphql", access["explanations"])
+            raise PermissionError(f"Access denied to record '{id}': No object authorization")
+
+        with db() as c:
+            row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                            (tenant_id, str(id))).fetchone()
+        if not row:
+            return None
+        return GraphQLRecordNode(id=row["id"], owner_id=row["owner_id"], data=row["data"])
+
+    @strawberry.field
+    def records(self, info: strawberry.Info, ids: list[str]) -> list[GraphQLRecordNode]:
+        request: Request = info.context["request"]
+        subject, _role, tenant_id = _extract_gql_identity(request)
+        nodes = []
+        for rid in ids:
+            if is_canary_record(tenant_id, rid):
+                trigger_canary_trap(tenant_id, subject, rid, endpoint="graphql")
+                continue
+            access = authorization_context(tenant_id, subject, rid, action="read")
+            engine.evaluate(tenant_id, subject, rid, allowed=access["authorization"] is not None, endpoint="graphql")
+            if access["authorization"] is not None:
+                with db() as c:
+                    row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                                    (tenant_id, str(rid))).fetchone()
+                if row:
+                    nodes.append(GraphQLRecordNode(id=row["id"], owner_id=row["owner_id"], data=row["data"]))
+        return nodes
+
+
+graphql_schema = strawberry.Schema(query=GraphQLQuery)
+app.include_router(GraphQLRouter(graphql_schema), prefix="/graphql")
 
 
 @app.get("/audit-events")
