@@ -13,6 +13,10 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [probeActor, setProbeActor] = useState('alice');
+  const [probeRecordId, setProbeRecordId] = useState('1');
+  const [probeResult, setProbeResult] = useState<any>(null);
+  const [isProbing, setIsProbing] = useState(false);
 
   useEffect(() => {
     const autoLogin = async () => {
@@ -108,6 +112,70 @@ export default function App() {
       console.error(err);
     }
     setIsSimulating(false);
+  };
+
+  const handleProbe = async () => {
+    setIsProbing(true);
+    setProbeResult(null);
+    try {
+      const loginRes = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: probeActor, password: 'changeme123' })
+      });
+      if (!loginRes.ok) {
+        setProbeResult({
+          status: loginRes.status,
+          outcome: 'auth_failed',
+          explanation: `Failed to authenticate as ${probeActor}`
+        });
+        setIsProbing(false);
+        return;
+      }
+      const { access_token } = await loginRes.json();
+
+      const recRes = await fetch(`${API_BASE}/records/${encodeURIComponent(probeRecordId)}`, {
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+
+      const decisionHeader = recRes.headers.get('X-Detector-Decision');
+      const signalsHeader = recRes.headers.get('X-Detector-Signals');
+      const scoreHeader = recRes.headers.get('X-Risk-Score');
+
+      let body: any = {};
+      try { body = await recRes.json(); } catch {}
+
+      if (recRes.ok) {
+        setProbeResult({
+          status: recRes.status,
+          outcome: 'allowed',
+          decision: decisionHeader || 'allow',
+          signals: signalsHeader ? signalsHeader.split(',').filter(Boolean) : [],
+          score: scoreHeader || body.score || 0,
+          explanation: body.decision?.explanations?.[0] || 'Access Allowed: Object ownership authorized'
+        });
+      } else {
+        const detail = body.detail || {};
+        setProbeResult({
+          status: recRes.status,
+          outcome: detail.outcome || 'denied',
+          decision: decisionHeader || (detail.outcome === 'blocked' ? 'block' : 'deny'),
+          signals: signalsHeader ? signalsHeader.split(',').filter(Boolean) : (detail.signals || []),
+          score: scoreHeader || detail.score || 0,
+          explanation: detail.explanations?.[0] || detail.reason || 'BOLA Violation: Unauthorized Object Access Denied'
+        });
+      }
+
+      setSelectedSubject(probeActor);
+      await fetchData(probeActor);
+    } catch (err: any) {
+      setProbeResult({
+        status: 500,
+        outcome: 'network_error',
+        explanation: err?.message || 'Connection error to backend'
+      });
+    }
+    setIsProbing(false);
   };
 
   return (
@@ -318,6 +386,85 @@ export default function App() {
                 <span>RESET DEMO</span>
               </button>
             </div>
+          </section>
+
+          {/* Card: Interactive Access Probe */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="interactive-probe-card">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" strokeLinecap="round" strokeLinejoin="round"></path>
+              </svg>
+              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">INTERACTIVE ACCESS PROBE</h2>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">ACTOR (CALLER)</label>
+                <select
+                  value={probeActor}
+                  onChange={(e) => setProbeActor(e.target.value)}
+                  className="w-full bg-[#0A0A0A] border border-[#262626] text-[#F5F5F5] text-xs rounded-xl py-2 px-3 focus:outline-none focus:border-[#FF3B5C] transition-colors"
+                >
+                  <option value="alice">Alice (Owner 1-50)</option>
+                  <option value="bob">Bob (Owner 51-100)</option>
+                  <option value="dr_singh">Dr. Singh (Assigned 1-25)</option>
+                  <option value="support_amy">Support Amy (Delegated #17)</option>
+                  <option value="attacker_1">Attacker 1 (Unassigned)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">RECORD ID</label>
+                <input
+                  type="text"
+                  value={probeRecordId}
+                  onChange={(e) => setProbeRecordId(e.target.value)}
+                  placeholder="e.g. 1, 51, 99"
+                  className="w-full bg-[#0A0A0A] border border-[#262626] text-[#F5F5F5] text-xs rounded-xl py-2 px-3 focus:outline-none focus:border-[#FF3B5C] font-mono transition-colors"
+                />
+              </div>
+            </div>
+
+            <button
+              disabled={isProbing}
+              onClick={handleProbe}
+              className="w-full bg-[#FF3B5C] hover:bg-[#e03150] text-[#0A0A0A] font-bold text-xs py-2.5 px-4 rounded-xl shadow-xs transition-colors tracking-wider uppercase flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {isProbing ? (
+                <span className="inline-block animate-spin">⟳</span>
+              ) : (
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                  <path d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" strokeLinecap="round" strokeLinejoin="round"></path>
+                </svg>
+              )}
+              <span>PROBE OBJECT ACCESS</span>
+            </button>
+
+            {probeResult && (
+              <div className={`mt-3 p-3 rounded-xl border text-xs font-mono transition-all ${
+                probeResult.outcome === 'allowed'
+                  ? 'bg-[#0f1f14] border-[#22c55e]/40 text-[#4ade80]'
+                  : probeResult.outcome === 'blocked'
+                  ? 'bg-[#260e14] border-[#FF3B5C] text-[#FF3B5C]'
+                  : 'bg-[#22140c] border-[#F97316]/50 text-[#F97316]'
+              }`}>
+                <div className="flex items-center justify-between font-bold mb-1">
+                  <span>HTTP {probeResult.status} [{probeResult.outcome?.toUpperCase()}]</span>
+                  <span className="text-[10px] uppercase px-1.5 py-0.5 rounded bg-black/40 border border-current">
+                    DECISION: {probeResult.decision?.toUpperCase() || 'DENY'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#F5F5F5] mt-1 leading-snug">{probeResult.explanation}</p>
+                {probeResult.signals && probeResult.signals.length > 0 && (
+                  <div className="mt-2 pt-1.5 border-t border-white/10 flex flex-wrap gap-1">
+                    {probeResult.signals.map((sig: string, idx: number) => (
+                      <span key={idx} className="text-[9px] px-1.5 py-0.5 bg-black/50 rounded text-white/80 border border-white/10">
+                        {sig}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
         {/* END: CenterColumn */}

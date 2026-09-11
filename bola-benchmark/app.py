@@ -162,7 +162,7 @@ def init_schema() -> None:
             );
             CREATE TABLE IF NOT EXISTS records (
                 tenant_id TEXT NOT NULL,
-                id INTEGER NOT NULL,
+                id TEXT NOT NULL,
                 owner_id TEXT NOT NULL,
                 data TEXT NOT NULL,
                 PRIMARY KEY (tenant_id, id)
@@ -170,13 +170,13 @@ def init_schema() -> None:
             CREATE TABLE IF NOT EXISTS assignments (
                 tenant_id TEXT NOT NULL,
                 subject_id TEXT NOT NULL,
-                record_id INTEGER NOT NULL,
+                record_id TEXT NOT NULL,
                 PRIMARY KEY (tenant_id, subject_id, record_id)
             );
             CREATE TABLE IF NOT EXISTS access_grants (
                 tenant_id TEXT NOT NULL,
                 subject_id TEXT NOT NULL,
-                record_id INTEGER NOT NULL,
+                record_id TEXT NOT NULL,
                 expires_at DOUBLE PRECISION NOT NULL,
                 reason TEXT NOT NULL,
                 approved_by TEXT NOT NULL,
@@ -258,51 +258,52 @@ def seed_demo_tenant(force: bool = False) -> None:
             "INSERT INTO users (tenant_id, id, role, password_hash) VALUES (%s, %s, %s, %s)",
             [(DEMO_TENANT_ID, *u) for u in users],
         )
-        records = [(i, "alice" if i <= 50 else "bob", f"confidential record {i}") for i in range(1, 101)]
+        records = [(str(i), "alice" if i <= 50 else "bob", f"confidential record {i}") for i in range(1, 101)]
         cur.executemany(
             "INSERT INTO records (tenant_id, id, owner_id, data) VALUES (%s, %s, %s, %s)",
             [(DEMO_TENANT_ID, *r) for r in records],
         )
         cur.executemany(
             "INSERT INTO assignments (tenant_id, subject_id, record_id) VALUES (%s, %s, %s)",
-            [(DEMO_TENANT_ID, "dr_singh", i) for i in range(1, 26)],
+            [(DEMO_TENANT_ID, "dr_singh", str(i)) for i in range(1, 26)],
         )
         cur.executemany(
             "INSERT INTO assignments (tenant_id, subject_id, record_id) VALUES (%s, %s, %s)",
-            [(DEMO_TENANT_ID, "dr_lee", i) for i in range(26, 51)],
+            [(DEMO_TENANT_ID, "dr_lee", str(i)) for i in range(26, 51)],
         )
         cur.execute(
             "INSERT INTO access_grants (tenant_id, subject_id, record_id, expires_at, reason, approved_by) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (DEMO_TENANT_ID, "support_amy", 17, time.time() + 3600, "ticket-8431", ADMIN_ROLE),
+            (DEMO_TENANT_ID, "support_amy", "17", time.time() + 3600, "ticket-8431", ADMIN_ROLE),
         )
         cur.executemany(
             "INSERT INTO access_grants (tenant_id, subject_id, record_id, expires_at, reason, approved_by) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
             [
-                (DEMO_TENANT_ID, "dr_cover", 8, time.time() + 1800, "shift-cover-ward-a", ADMIN_ROLE),
-                (DEMO_TENANT_ID, "dr_cover", 31, time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
+                (DEMO_TENANT_ID, "dr_cover", "8", time.time() + 1800, "shift-cover-ward-a", ADMIN_ROLE),
+                (DEMO_TENANT_ID, "dr_cover", "31", time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
             ],
         )
 
 
-def authorization_context(tenant_id: str, subject: str, record_id: int) -> dict:
+def authorization_context(tenant_id: str, subject: str, record_id: int | str) -> dict:
     """Authoritative policy for the demo/dashboard's own record model.
     The learned graph is never an authorization source."""
     with db() as c:
+        rec_id = str(record_id)
         DENY_EXPLANATION = "Access denied: you are not the owner, are not assigned, and have no active delegation."
         record = c.execute("SELECT owner_id FROM records WHERE tenant_id = %s AND id = %s",
-                            (tenant_id, record_id)).fetchone()
+                            (tenant_id, rec_id)).fetchone()
         if not record:
             return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
         if record["owner_id"] == subject:
             return {"authorization": "owner", "explanations": ["Access allowed: you own this record."], "delegation": None}
         if c.execute("SELECT 1 FROM assignments WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
-                     (tenant_id, subject, record_id)).fetchone():
+                     (tenant_id, subject, rec_id)).fetchone():
             return {"authorization": "assigned", "explanations": ["Access allowed: you are assigned to this record."], "delegation": None}
         grant = c.execute(
             "SELECT expires_at, reason, approved_by FROM access_grants WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
-            (tenant_id, subject, record_id)).fetchone()
+            (tenant_id, subject, rec_id)).fetchone()
         if grant and grant["expires_at"] > time.time():
             seconds_remaining = max(0, int(grant["expires_at"] - time.time()))
             return {"authorization": "delegated",
@@ -380,12 +381,13 @@ class BehavioralRiskEngine:
     tenant A's traffic can never affect tenant B's risk scores or blocks."""
 
     def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0,
-                 rapid_threshold: int = 4, slow_threshold: int = 15):
+                 rapid_threshold: int = 4, slow_threshold: int = 15, strike_window: float = 86400.0):
         self.short_window = short_window
         self.long_window = long_window
         self.block_duration = block_duration
         self.rapid_threshold = rapid_threshold
         self.slow_threshold = slow_threshold
+        self.strike_window = strike_window
 
     def record_event(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
                       at: float | None = None, endpoint: str = "records") -> None:
@@ -406,7 +408,7 @@ class BehavioralRiskEngine:
 
     def get_strike_count(self, tenant_id: str, subject: str, now: float | None = None) -> int:
         now = now or time.time()
-        cutoff = now - self.long_window
+        cutoff = now - self.strike_window
         with db() as c:
             c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s AND subject = %s AND at <= %s",
                       (tenant_id, subject, cutoff))
@@ -495,9 +497,10 @@ class BehavioralRiskEngine:
     def cleanup_stale(self, tenant_id: str) -> None:
         now = time.time()
         cutoff = now - self.long_window
+        strike_cutoff = now - self.strike_window
         with db() as c:
             c.execute("DELETE FROM risk_events WHERE tenant_id = %s AND at <= %s", (tenant_id, cutoff))
-            c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s AND at <= %s", (tenant_id, cutoff))
+            c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s AND at <= %s", (tenant_id, strike_cutoff))
             c.execute("DELETE FROM risk_blocks WHERE tenant_id = %s AND blocked_until < %s", (tenant_id, now))
 
     def reset(self, tenant_id: str) -> None:
@@ -824,9 +827,20 @@ def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score
     return alert_payload
 
 
+@app.get("/healthz")
+def healthz() -> dict:
+    try:
+        with db() as c:
+            c.execute("SELECT 1").fetchone()
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    return {"status": "ok" if db_status == "connected" else "degraded", "db": db_status, "env": APP_ENV}
+
+
 @app.get("/records/{record_id}")
 @limiter.limit("1000/minute")
-def get_record(record_id: int, request: Request, response: Response,
+def get_record(record_id: str, request: Request, response: Response,
                identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
     subject, _role, tenant_id = identity
 
@@ -859,7 +873,7 @@ def get_record(record_id: int, request: Request, response: Response,
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     with db() as c:
         row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
-                         (tenant_id, record_id)).fetchone()
+                         (tenant_id, str(record_id))).fetchone()
     record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations)
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
@@ -939,7 +953,7 @@ def simulate_coordinated(request: Request, _guard: None = Depends(guard_demo_end
 
 
 @app.get("/users/{user_id}")
-def get_user(user_id: int, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+def get_user(user_id: str, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
     subject, _role, tenant_id = identity
     decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, user_id, False, endpoint="users")
     if decision == "block":
@@ -947,7 +961,7 @@ def get_user(user_id: int, response: Response, identity: tuple[str, str, str] = 
     raise HTTPException(403, detail={"outcome": "denied", "score": score, "category": category})
 
 @app.get("/invoices/{invoice_id}")
-def get_invoice(invoice_id: int, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+def get_invoice(invoice_id: str, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
     subject, _role, tenant_id = identity
     decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, invoice_id, False, endpoint="invoices")
     if decision == "block":
@@ -1077,7 +1091,7 @@ def test_soc_webhook(payload: dict | None = None, identity: tuple[str, str, str]
 
 
 @app.get("/records/{record_id}/graph-risk")
-def get_record_graph_risk(record_id: int, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+def get_record_graph_risk(record_id: str, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
     _subject, _role, tenant_id = identity
     result = score_record_graph_anomaly(tenant_id, record_id)
     if result is None:

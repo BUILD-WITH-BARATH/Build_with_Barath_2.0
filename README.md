@@ -200,40 +200,46 @@ Build_with_Barath_2.0/
 
 ## 🚀 Quick Start Guide
 
-### 1. Get a Postgres database
-This app is Postgres-only (no SQLite fallback). Fastest path: a free hosted instance at [neon.tech](https://neon.tech) or [supabase.com](https://supabase.com) — copy the connection string.
+### Option A: Zero-Config Local Setup with Docker (Recommended)
+Spin up PostgreSQL, FastAPI Backend, and React Frontend with a single command:
+```bash
+docker compose up --build
+```
+* **Frontend Dashboard:** `http://localhost:5173` (Crimson SOC Command Center + Interactive Prober)
+* **Backend Swagger Docs:** `http://localhost:8000/docs`
+* **Health Check:** `http://localhost:8000/healthz`
 
-### 2. Run Backend Server
+---
+
+### Option B: Run Manually (Local Dev)
+
+#### 1. Get a Postgres database
+This app is Postgres-backed (multi-tenant). Point it at a local Postgres or free hosted instance (e.g. [neon.tech](https://neon.tech), [supabase.com](https://supabase.com)).
+
+#### 2. Run Backend Server
 ```bash
 cd bola-benchmark
 python -m venv .venv
 # Windows: .\.venv\Scripts\activate      Linux/macOS: source .venv/bin/activate
 
 pip install -r requirements.txt
-cp .env.example .env   # fill in DATABASE_URL at minimum
+cp .env.example .env   # set DATABASE_URL
 uvicorn app:app --port 8000 --reload
 ```
-* Swagger Docs: `http://127.0.0.1:8000/docs` · Health check: `http://127.0.0.1:8000/health`
+* Swagger Docs: `http://127.0.0.1:8000/docs` · Health check: `http://127.0.0.1:8000/healthz`
 * Demo login: any seeded user (`alice`, `bob`, `dr_singh`, `attacker_1`, ...) with password `changeme123`; `security_admin` with `admin_changeme123`.
 
-### 3. Run Frontend Dashboard
+#### 3. Run Frontend Dashboard
 ```bash
 cd bola-frontend
 npm install
 npm run dev
 ```
 
-### 4. Run Tests
+#### 4. Run Tests
 ```bash
 cd bola-benchmark && pytest test_detector.py -v
 cd cyberaccess-sdk-python && pip install -e ".[fastapi,dev]" && pytest -v
-```
-
-### 5. Run in Docker
-```bash
-cd bola-benchmark
-docker build -t cyberaccess-backend .
-docker run -p 8000:8000 -e DATABASE_URL="postgresql://..." cyberaccess-backend
 ```
 
 ### 6. Deploy to Render

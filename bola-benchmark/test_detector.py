@@ -260,3 +260,33 @@ def test_37_tenant_isolation_demo_unaffected():
                     headers={"X-API-Key": api_key})
     after = client.get("/stats").json()
     assert after["active_subjects"] == before["active_subjects"]
+
+
+def test_38_healthz():
+    res = client.get("/healthz")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+
+def test_39_strike_retention_beyond_sliding_window():
+    """Strikes must NOT be purged by the 5-minute sliding window (long_window).
+    They must be retained across lockout durations so repeat offenders escalate to Strike 2 and 3."""
+    subject = "persistent_adversary"
+    tenant_id = DEMO_TENANT_ID
+    now = time.time()
+
+    # Issue Strike 1 at t0
+    engine.register_strike_and_block(tenant_id, subject, now)
+    assert engine.get_strike_count(tenant_id, subject, now) == 1
+
+    # Simulate 10 minutes passing (600s > 300s long_window)
+    future_now = now + 600
+    engine.cleanup_stale(tenant_id)
+
+    # Strike 1 must still exist at future_now
+    assert engine.get_strike_count(tenant_id, subject, future_now) == 1
+
+    # Issue Strike 2
+    engine.register_strike_and_block(tenant_id, subject, future_now)
+    assert engine.get_strike_count(tenant_id, subject, future_now) == 2
+
