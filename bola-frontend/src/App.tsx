@@ -46,14 +46,16 @@ export default function App() {
   const fetchData = useCallback(async (subjOverride?: string) => {
     const subj = subjOverride !== undefined ? subjOverride : (selectedSubject || 'alice');
     try {
-      const headers: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      // /audit-events (and its alias /events) both require a security_admin bearer
+      // token server-side - there is no anonymous audit endpoint to fall back to.
+      // Skip the call entirely until authToken exists instead of guaranteeing a 401.
       const [statsRes, configRes, riskRes, eventsRes] = await Promise.all([
         fetch(`${API_BASE}/stats`),
         fetch(`${API_BASE}/config`),
         fetch(`${API_BASE}/risk/${encodeURIComponent(subj)}`),
         authToken
-          ? fetch(`${API_BASE}/audit-events`, { headers })
-          : fetch(`${API_BASE}/events`, { headers }).catch(() => new Response(JSON.stringify({ events: [] })))
+          ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${authToken}` } })
+          : Promise.resolve(null)
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
