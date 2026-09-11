@@ -114,7 +114,7 @@ class Event:
 
 
 class BehavioralRiskEngine:
-    def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 300.0, rapid_threshold: int = 4, slow_threshold: int = 15):
+    def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0, rapid_threshold: int = 4, slow_threshold: int = 15):
         self.short_window = short_window
         self.long_window = long_window
         self.block_duration = block_duration
@@ -122,7 +122,57 @@ class BehavioralRiskEngine:
         self.slow_threshold = slow_threshold
         self.history: dict[str, deque[Event]] = defaultdict(deque)
         self.blocked_until: dict[str, float] = {}
+        self.strikes: dict[str, list[float]] = defaultdict(list)
+        self.pending_permanent_bans: set[str] = set()
+        self.approved_permanent_bans: set[str] = set()
         self.global_record_tracker: dict[int, set[str]] = defaultdict(set)
+
+    def get_strike_count(self, subject: str, now: float | None = None) -> int:
+        now = now or time.time()
+        valid_strikes = [t for t in self.strikes[subject] if now - t <= self.long_window]
+        self.strikes[subject] = valid_strikes
+        return len(valid_strikes)
+
+    def register_strike_and_block(self, subject: str, now: float) -> tuple[float, str, int]:
+        """Registers a new strike within the 1-hour window and escalates the penalty."""
+        self.get_strike_count(subject, now)
+        self.strikes[subject].append(now)
+        count = len(self.strikes[subject])
+        
+        if count == 1:
+            lockout = 120.0 # Strike 1: 2-Minute Soft Lockout
+            signal = "strike_1_soft_lockout_2m"
+        elif count == 2:
+            lockout = 1800.0 # Strike 2: 30-Minute Hard Lockout
+            signal = "strike_2_hard_lockout_30m"
+        else:
+            if subject in self.approved_permanent_bans:
+                lockout = 315360000.0 # Permanent Ban (10 years)
+                signal = "strike_3_permanent_ban_approved"
+            else:
+                # 🚨 Strike 3 requires Admin Approval: Place in temporary holding quarantine (30m) pending admin review
+                self.pending_permanent_bans.add(subject)
+                lockout = 1800.0
+                signal = "strike_3_pending_admin_approval"
+            
+        self.blocked_until[subject] = now + lockout
+        return lockout, signal, count
+
+    def approve_permanent_ban(self, subject: str, now: float | None = None) -> bool:
+        now = now or time.time()
+        self.pending_permanent_bans.discard(subject)
+        self.approved_permanent_bans.add(subject)
+        self.blocked_until[subject] = now + 315360000.0
+        return True
+
+    def reject_permanent_ban(self, subject: str, now: float | None = None) -> bool:
+        now = now or time.time()
+        self.pending_permanent_bans.discard(subject)
+        self.approved_permanent_bans.discard(subject)
+        if self.strikes[subject]:
+            self.strikes[subject].pop()
+        self.blocked_until[subject] = now + 60.0
+        return True
 
     def cleanup_stale(self) -> None:
         now = time.time()
@@ -138,6 +188,9 @@ class BehavioralRiskEngine:
     def reset(self) -> None:
         self.history.clear()
         self.blocked_until.clear()
+        self.strikes.clear()
+        self.pending_permanent_bans.clear()
+        self.approved_permanent_bans.clear()
         self.global_record_tracker.clear()
 
     def evaluate(self, subject: str, record_id: int, allowed: bool, endpoint: str = "records") -> tuple[str, list[str], bool, int, str]:
@@ -148,7 +201,16 @@ class BehavioralRiskEngine:
             
         # Check if currently blocked
         if self.blocked_until.get(subject, 0) > now:
-            return "block", ["temporarily_blocked"], False, 100, "Attack"
+            strike_count = self.get_strike_count(subject, now)
+            if subject in self.approved_permanent_bans:
+                sig = "strike_3_permanent_ban_approved"
+            elif subject in self.pending_permanent_bans or strike_count >= 3:
+                sig = "strike_3_pending_admin_approval"
+            elif strike_count == 2:
+                sig = "strike_2_hard_lockout_30m"
+            else:
+                sig = "strike_1_soft_lockout_2m"
+            return "block", ["temporarily_blocked", sig], False, 100, "Attack"
 
         # prune long history
         q = self.history[subject]
@@ -164,8 +226,9 @@ class BehavioralRiskEngine:
         decision = "allow" if allowed else "deny"
         if score >= 90:
             decision = "block"
-            self.blocked_until[subject] = now + self.block_duration
+            lockout, strike_sig, count = self.register_strike_and_block(subject, now)
             signals.append("blocked_due_to_high_risk")
+            signals.append(strike_sig)
             
         return decision, signals, unseen, score, category
 
@@ -216,7 +279,23 @@ class BehavioralRiskEngine:
                 
         score = min(100, sum(contributions.values()))
         
-        if score < 40:
+        if self.blocked_until.get(subject, 0) > now:
+            score = 100
+            if "temporarily_blocked" not in signals:
+                signals.append("temporarily_blocked")
+            strike_count = self.get_strike_count(subject, now)
+            if subject in self.approved_permanent_bans:
+                if "strike_3_permanent_ban_approved" not in signals:
+                    signals.append("strike_3_permanent_ban_approved")
+            elif subject in self.pending_permanent_bans or strike_count >= 3:
+                if "strike_3_pending_admin_approval" not in signals:
+                    signals.append("strike_3_pending_admin_approval")
+            elif strike_count == 2 and "strike_2_hard_lockout_30m" not in signals:
+                signals.append("strike_2_hard_lockout_30m")
+            elif strike_count == 1 and "strike_1_soft_lockout_2m" not in signals:
+                signals.append("strike_1_soft_lockout_2m")
+            category = "Attack"
+        elif score < 40:
             category = "Normal"
         elif score < 70:
             category = "Suspicious"
@@ -240,7 +319,11 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "high_failure_ratio": "You have a high ratio of failed to successful requests.",
         "endpoint_diversity": "You have triggered unauthorized access across multiple API endpoints.",
         "temporarily_blocked": "Your identity has been temporarily blocked due to malicious behavior.",
-        "blocked_due_to_high_risk": "Your risk score reached the Attack threshold and you are now blocked."
+        "blocked_due_to_high_risk": "Your risk score reached the Attack threshold and you are now blocked.",
+        "strike_1_soft_lockout_2m": "Strike 1/3: 2-Minute Soft Lockout penalty enforced.",
+        "strike_2_hard_lockout_30m": "Strike 2/3: Repeat violation within 1 hour. 30-Minute Hard Lockout penalty enforced.",
+        "strike_3_pending_admin_approval": "Strike 3/3 Reached: Permanent Ban PENDING ADMIN APPROVAL (Quarantined).",
+        "strike_3_permanent_ban_approved": "Strike 3/3: Permanent Firewall Blacklist APPROVED by Administrator."
     }
     return [messages[s] for s in signals if s in messages]
 
@@ -250,6 +333,36 @@ def reset() -> dict:
     seed_database()
     engine.reset()
     return {"status": "reset"}
+
+
+soc_alerts: list[dict] = []
+
+def dispatch_soc_alert(subject: str, record_id: int, score: int, category: str, signals: list[str]) -> dict:
+    """Dispatches a structured forensic payload to SIEM/SOC and appends to in-memory audit queue."""
+    strikes = max(1, engine.get_strike_count(subject))
+    tier = "PERMANENT_BLACKLIST" if strikes >= 3 else ("HARD_LOCKOUT_30M" if strikes == 2 else "SOFT_LOCKOUT_2M")
+    mitigation = "PERMANENT_IDENTITY_BLACKLIST (Strike 3/3)" if strikes >= 3 else ("AUTOMATIC_IDENTITY_LOCKOUT_30M (Strike 2/3)" if strikes == 2 else "AUTOMATIC_IDENTITY_LOCKOUT_120S (Strike 1/3)")
+    
+    alert_payload = {
+        "alert_id": f"SOC-ALERT-{int(time.time() * 1000)}",
+        "timestamp": time.time(),
+        "severity": "CRITICAL" if (score >= 90 or strikes >= 2) else "HIGH",
+        "threat_type": "BOLA_ENUMERATION_ATTACK",
+        "attacker_identity": subject,
+        "targeted_record_id": record_id,
+        "risk_score": score,
+        "risk_category": category,
+        "signals_tripped": signals,
+        "strike_level": f"Strike {min(strikes, 3)}/3",
+        "escalation_tier": tier,
+        "mitigation_action": mitigation,
+        "recommended_secops_action": f"Revoke active OAuth token for '{subject}' and isolate network source." if strikes < 3 else f"PERMANENTLY BAN '{subject}' and revoke all credentials."
+    }
+    soc_alerts.insert(0, alert_payload)
+    if len(soc_alerts) > 50:
+        soc_alerts.pop()
+        
+    return alert_payload
 
 
 @app.get("/records/{record_id}")
@@ -280,8 +393,11 @@ def get_record(record_id: int, response: Response,
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
         record_audit(subject, record_id, authorization, decision, "blocked", explanations)
+        # 🚨 Trigger Real-Time SOC Incident Alert
+        dispatch_soc_alert(subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "signals": signals,
-                                         "explanations": explanations, "score": score, "category": category},
+                                         "explanations": explanations, "score": score, "category": category,
+                                         "soc_alert_dispatched": True},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     if authorization is None:
@@ -335,21 +451,15 @@ def simulate_low_and_slow() -> dict:
     client = TestClient(app)
     results = []
     
-    # We simulate time passing by patching time.time inside the engine evaluate loop, but testclient hits endpoints.
-    # To properly simulate without sleeping for an hour, we can manually create requests and adjust the engine's time.
-    # We will inject historical events into the engine for the attacker.
-    
     subject = "attacker_slow"
     now = time.time()
     
-    # Generate 15 failed requests spaced 10 minutes apart
+    # Generate 15 failed requests spaced over the hour
     for i in range(15):
-        event_time = now - (3600) + (i * 240) # Spaced over the last hour
+        event_time = now - (3600) + (i * 240)
         engine.history[subject].append(Event(50+i, False, event_time))
-        # Log to audit DB
         record_audit(subject, 50+i, None, "deny", "denied", ["Simulated low and slow deny"])
         
-    # Now trigger one real request to hit the threshold
     res = client.get(f"/records/66", headers={"X-Subject": subject})
     results.append({"status": res.status_code, "risk": res.headers.get("X-Risk-Score"), "category": res.headers.get("X-Risk-Category")})
     return {"status": "low_and_slow_simulated", "results": results}
@@ -388,7 +498,10 @@ def get_config() -> dict:
         "short_window": engine.short_window,
         "long_window": engine.long_window,
         "rapid_threshold": engine.rapid_threshold,
-        "slow_threshold": engine.slow_threshold
+        "slow_threshold": engine.slow_threshold,
+        "strike_1_duration": "2m (Soft)",
+        "strike_2_duration": "30m (Hard)",
+        "strike_3_duration": "Permanent (Blacklist)"
     }
 
 @app.get("/stats")
@@ -411,7 +524,92 @@ def get_events(x_subject: str | None = Header(default=None)) -> dict:
 def get_risk(subject: str) -> dict:
     now = time.time()
     res = engine.compute_risk(subject, now)
-    return {"subject": subject, "score": res["score"], "category": res["category"], "signals": res["signals"], "contributions": res["contributions"]}
+    strikes = engine.get_strike_count(subject, now)
+    is_blocked = engine.blocked_until.get(subject, 0) > now
+    remaining = int(engine.blocked_until[subject] - now) if is_blocked else 0
+    is_pending = subject in engine.pending_permanent_bans or (strikes >= 3 and subject not in engine.approved_permanent_bans and is_blocked)
+    is_approved = subject in engine.approved_permanent_bans or (is_blocked and remaining > 86400 * 30)
+    return {
+        "subject": subject,
+        "score": res["score"],
+        "category": res["category"],
+        "signals": res["signals"],
+        "contributions": res["contributions"],
+        "strikes": strikes,
+        "is_blocked": is_blocked,
+        "is_pending_ban": is_pending,
+        "is_approved_ban": is_approved,
+        "is_permanent": is_approved,
+        "lockout_remaining_s": remaining
+    }
+
+
+@app.post("/admin/approve-ban/{subject}")
+def approve_permanent_ban_endpoint(subject: str) -> dict:
+    """Admin approves permanent firewall ban for Strike 3 offender."""
+    engine.approve_permanent_ban(subject)
+    record_audit(subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin APPROVED Permanent Firewall Ban for '{subject}'"])
+    return {"status": "permanent_ban_approved", "subject": subject, "is_permanent": True}
+
+
+@app.post("/admin/reject-ban/{subject}")
+def reject_permanent_ban_endpoint(subject: str) -> dict:
+    """Admin dismisses permanent ban and relaxes penalty for false-positive or pentester."""
+    engine.reject_permanent_ban(subject)
+    record_audit(subject, 0, "ADMIN_AUTHORITY", "allow", "allowed", [f"Admin DISMISSED Permanent Ban for '{subject}' (Quarantine Relaxed)"])
+    return {"status": "ban_dismissed", "subject": subject, "is_permanent": False}
+
+
+@app.get("/admin/pending-bans")
+def get_pending_bans() -> dict:
+    """Returns all subjects currently awaiting administrative ban approval."""
+    return {
+        "pending_bans": list(engine.pending_permanent_bans),
+        "approved_bans": list(engine.approved_permanent_bans)
+    }
+
+
+@app.get("/soc/alerts")
+def get_soc_alerts() -> dict:
+    """Returns real-time forensic alerts dispatched to the SOC / SIEM."""
+    return {
+        "total_alerts": len(soc_alerts),
+        "recent_alerts": soc_alerts[:20]
+    }
+
+
+@app.post("/soc/test-webhook")
+def test_soc_webhook(payload: dict | None = None) -> dict:
+    """Trigger or receive external SOC alert webhook and log to audit events."""
+    if not payload:
+        payload = dispatch_soc_alert(
+            subject="simulated_adversary",
+            record_id=999,
+            score=100,
+            category="Attack",
+            signals=["unauthorized_unique_object_pressure", "sequential_id_enumeration", "manual_test"]
+        )
+    else:
+        # Record into audit events table so it appears in live frontend dashboard
+        subject = payload.get("attacker_identity", "external_attacker")
+        target_id = payload.get("targeted_object_id", 0)
+        signals = payload.get("signals_tripped", ["bola_attempt"])
+        decision = payload.get("decision", "deny")
+        outcome = "blocked" if decision == "block" else "denied"
+        explanation = f"Django BOLA Activity: {','.join(signals)}" if outcome == "blocked" else f"Django Object Denied: Attempted {target_id}"
+        
+        # Feed into behavioral risk engine so /risk/{subject} and /stats reflect it
+        engine.history[subject].append(Event(target_id, False, time.time(), "records"))
+        if decision == "block":
+            lockout, strike_sig, count = engine.register_strike_and_block(subject, time.time())
+            if strike_sig not in signals:
+                signals.append(strike_sig)
+            score = payload.get("risk_score", 100)
+            category = payload.get("risk_category", "Attack")
+            dispatch_soc_alert(subject, target_id, score, category, signals)
+            
+        record_audit(subject, target_id, None, decision, outcome, [explanation])
+    return {"status": "alert_logged_and_synced", "payload": payload}
 
 
 seed_database()

@@ -83,32 +83,32 @@ export default function App() {
   const [auditFilter, setAuditFilter] = useState<'all' | 'blocked' | 'denied' | 'allowed'>('all');
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedEventDetail, setSelectedEventDetail] = useState<any | null>(null);
+  const fetchData = async (subjectToFetch?: string) => {
+    const subj = subjectToFetch !== undefined ? subjectToFetch : (selectedSubject || 'alice');
+    try {
+      const [statsRes, eventsRes, riskRes, configRes] = await Promise.all([
+        fetch(`${API_BASE}/stats`),
+        fetch(`${API_BASE}/audit-events`, { headers: { 'X-Subject': 'security_admin' } }),
+        fetch(`${API_BASE}/risk/${subj || 'alice'}`),
+        fetch(`${API_BASE}/config`),
+      ]);
+      
+      if (statsRes.ok) setStats(await statsRes.json());
+      if (eventsRes.ok) {
+        const evData = await eventsRes.json();
+        setEvents(evData.events || []);
+      }
+      if (riskRes.ok) setRiskData(await riskRes.json());
+      if (configRes.ok) setConfig(await configRes.json());
+      setIsOnline(true);
+    } catch (err) {
+      setIsOnline(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [statsRes, eventsRes, riskRes, configRes] = await Promise.all([
-          fetch(`${API_BASE}/stats`),
-          fetch(`${API_BASE}/audit-events`, { headers: { 'X-Subject': 'security_admin' } }),
-          fetch(`${API_BASE}/risk/${selectedSubject || 'alice'}`),
-          fetch(`${API_BASE}/config`),
-        ]);
-        
-        if (statsRes.ok) setStats(await statsRes.json());
-        if (eventsRes.ok) {
-          const evData = await eventsRes.json();
-          setEvents(evData.events || []);
-        }
-        if (riskRes.ok) setRiskData(await riskRes.json());
-        if (configRes.ok) setConfig(await configRes.json());
-        setIsOnline(true);
-      } catch (err) {
-        setIsOnline(false);
-      }
-    };
-
     fetchData();
-    const interval = setInterval(fetchData, 2000);
+    const interval = setInterval(() => fetchData(), 2000);
     return () => clearInterval(interval);
   }, [selectedSubject]);
 
@@ -116,7 +116,15 @@ export default function App() {
     setIsSimulating(true);
     setLastSimulatedVector(type);
     try {
+      let targetSubject = 'alice';
+      if (type === 'rapid') targetSubject = 'attacker_1';
+      else if (type === 'low_and_slow') targetSubject = 'attacker_slow';
+      else if (type === 'normal') targetSubject = 'alice';
+      else if (type === 'coordinated') targetSubject = 'sybil_1';
+      
+      setSelectedSubject(targetSubject);
       await fetch(`${API_BASE}/simulate/${type}`, { method: 'POST' });
+      await fetchData(targetSubject);
     } catch (err) {
       console.error(err);
     }
@@ -124,9 +132,31 @@ export default function App() {
   };
 
   const reset = async () => {
+    setIsSimulating(true);
     try {
       await fetch(`${API_BASE}/reset`, { method: 'POST' });
       setLastSimulatedVector(null);
+      setSelectedSubject('alice');
+      await fetchData('alice');
+    } catch (err) {
+      console.error(err);
+    }
+    setIsSimulating(false);
+  };
+
+  const approvePermanentBan = async (subject: string) => {
+    try {
+      await fetch(`${API_BASE}/admin/approve-ban/${subject}`, { method: 'POST' });
+      await fetchData(subject);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const rejectPermanentBan = async (subject: string) => {
+    try {
+      await fetch(`${API_BASE}/admin/reject-ban/${subject}`, { method: 'POST' });
+      await fetchData(subject);
     } catch (err) {
       console.error(err);
     }
@@ -357,7 +387,7 @@ export default function App() {
                 Deterministic SQL authorization with real-time sliding graph telemetry.
               </p>
               <div className="flex items-center justify-between text-[11px] font-mono text-slate-300 bg-slate-950/80 px-3 py-2 rounded-xl border border-slate-800/80">
-                <span>Port: 8001</span>
+                <span>Port: 8000</span>
                 <span className="text-cyan-400 font-bold">Connected</span>
               </div>
             </div>
@@ -880,9 +910,21 @@ export default function App() {
                         <span className="text-xs font-bold uppercase tracking-widest text-slate-400 font-mono">
                           INVESTIGATED: {selectedSubject || 'alice'}
                         </span>
-                        <span className={cn("px-3 py-1 rounded-xl text-xs font-black font-mono uppercase border", currentTheme.badge)}>
-                          {riskData?.category || 'NORMAL'}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className={cn("px-3 py-1 rounded-xl text-xs font-black font-mono uppercase border", currentTheme.badge)}>
+                            {riskData?.category || 'NORMAL'}
+                          </span>
+                          {riskData?.strikes > 0 && (
+                            <span className={cn(
+                              "px-2.5 py-1 rounded-xl text-xs font-black font-mono uppercase border",
+                              riskData.strikes >= 3 ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
+                              riskData.strikes === 2 ? "bg-orange-500/20 text-orange-300 border-orange-500/40" :
+                              "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                            )}>
+                              {riskData.is_permanent ? "STRIKE 3/3 (PERM BAN)" : `STRIKE ${riskData.strikes}/3`}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       <div className="text-center my-8">
@@ -894,10 +936,43 @@ export default function App() {
                         </div>
                       </div>
 
-                      {riskData?.score >= 90 ? (
+                      {/* 🛡️ Human-in-the-Loop Admin Ban Approval Box */}
+                      {riskData?.is_pending_ban && (
+                        <div className="mb-4 p-5 bg-amber-950/80 border border-amber-600/80 rounded-2xl shadow-xl animate-in fade-in text-left">
+                          <div className="flex items-center gap-2 text-amber-300 font-bold text-xs uppercase tracking-wider mb-2 font-display">
+                            <AlertTriangle className="w-4 h-4 text-amber-400 animate-bounce" />
+                            Strike 3: Permanent Ban Awaiting Admin Approval
+                          </div>
+                          <p className="text-[11px] text-amber-200/90 mb-4 leading-relaxed font-sans">
+                            This identity has triggered 3 repeat violations and is quarantined in temporary lockout. Select SecOps action:
+                          </p>
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <button 
+                              onClick={() => approvePermanentBan(selectedSubject || 'alice')}
+                              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/30 transition-all active:scale-95 flex items-center gap-1.5"
+                            >
+                              🔴 Approve Permanent Ban
+                            </button>
+                            <button 
+                              onClick={() => rejectPermanentBan(selectedSubject || 'alice')}
+                              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold text-xs rounded-xl transition-all active:scale-95"
+                            >
+                              ⚪ Dismiss / Forgive (Relax Penalty)
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {riskData?.is_blocked ? (
                         <div className="p-4 rounded-2xl bg-rose-950/80 border border-rose-800 text-rose-300 text-xs font-bold flex items-center gap-3 font-sans">
                           <AlertOctagon className="w-5 h-5 shrink-0 text-rose-400 animate-pulse" />
-                          <span>HIGH RISK BOLA DETECTED: This subject is blocked from API object queries.</span>
+                          <span>
+                            {riskData.is_permanent 
+                              ? "PERMANENT FIREWALL BAN (APPROVED BY ADMIN)" 
+                              : riskData.is_pending_ban 
+                              ? `STRIKE 3: QUARANTINED (${riskData.lockout_remaining_s}s)` 
+                              : `ACTION BLOCKED: Lockout Active (${riskData.lockout_remaining_s}s remaining)`}
+                          </span>
                         </div>
                       ) : (
                         <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-3 font-sans">
@@ -1367,6 +1442,41 @@ export default function App() {
 
                       <div className="p-4 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-center font-mono font-bold text-rose-300">
                         IF RISK SCORE &gt;= 90 OR 4+ DENIALS IN 30s → TEMPORARY BOLA BLOCK
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-center">
+                      <div className="h-6 w-[2px] bg-slate-700 my-1"></div>
+                    </div>
+
+                    {/* Node 4: Progressive 3-Strike Escalation & HITL Governance */}
+                    <div className="p-6 bg-gradient-to-br from-slate-900 to-slate-950 border border-indigo-500/40 rounded-3xl shadow-xl">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2 text-indigo-400 font-display font-bold text-sm">
+                          <ShieldAlert className="w-4 h-4" />
+                          <span>PROGRESSIVE 3-STRIKE POLICY &amp; HUMAN-IN-THE-LOOP GOVERNANCE</span>
+                        </div>
+                        <span className="text-[10px] bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 px-2.5 py-0.5 rounded-full uppercase font-mono font-bold">
+                          Governance
+                        </span>
+                      </div>
+                      <p className="text-slate-400 text-xs leading-relaxed mb-4 font-sans">
+                        Enforces escalating penalties for repeat attacks while preventing accidental rogue lockouts via required administrator review on Strike 3.
+                      </p>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-center font-mono text-xs">
+                        <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300">
+                          <div className="font-bold">Strike 1: Soft Lockout</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">2m Cool-off (Typo safety)</div>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-orange-500/15 border border-orange-500/30 text-orange-300">
+                          <div className="font-bold">Strike 2: Hard Lockout</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">30m Isolation + SOC Alert</div>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-300">
+                          <div className="font-bold">Strike 3: HITL Review</div>
+                          <div className="text-[10px] text-rose-400 mt-0.5 font-bold">Quarantine + Admin Approval</div>
+                        </div>
                       </div>
                     </div>
 
