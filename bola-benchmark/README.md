@@ -75,7 +75,8 @@ python benchmark.py
 | `POST` | `/auth/login` | Exchange credentials for a JWT bearer token |
 | `GET` | `/records/{record_id}` | Fetch a record (Evaluates Layer 1 Auth + Layer 2 Risk). Requires a bearer token. |
 | `GET` | `/audit-events` | View recent authorization audit logs (`security_admin` role only) |
-| `GET` | `/risk/{subject}` | Inspect real-time risk score and signals for a user |
+| `GET` | `/risk/{subject}` | Inspect real-time risk score and signals for a user (per-subject `IsolationForest`, synthetic-trained) |
+| `GET` | `/records/{record_id}/graph-risk` | Per-endpoint access-graph anomaly score from a second model (`RandomForestClassifier`, trained on real Kaggle-labeled data — see `train_endpoint_anomaly_model.py`). Diagnostic signal, not an allow/deny gate. Requires a bearer token. |
 | `GET` | `/stats` | Telemetry overview: active subjects, blocked actors, attacks |
 | `POST` | `/admin/approve-ban/{subject}` / `/admin/reject-ban/{subject}` | HITL Strike-3 ban approval (`security_admin` role only) |
 | `GET` | `/soc/alerts` | SIEM-style forensic alert feed (`security_admin` role only) |

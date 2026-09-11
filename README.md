@@ -95,6 +95,13 @@ flowchart TD
         FinalCheck -- No --> DenyOut["🛑 HTTP 403 Forbidden (No Data)"]
         FinalCheck -- Yes --> AllowOut["✅ HTTP 200 OK (Data Returned)"]
     end
+
+    Client2(["👤 Client (any logged-in user)"]) -->|"GET /records/{id}/graph-risk<br/>Authorization: Bearer JWT"| API2["⚡ FastAPI Server"]
+    subgraph L3 ["🤖 SECOND ML MODEL (parallel, separate call — not part of Layer 1-3's allow/deny path)"]
+        API2 --> Features["compute_record_graph_features(record_id)<br/>from risk_events: sessions, users, timing, uniqueness"]
+        Features --> RF["RandomForestClassifier<br/>trained OFFLINE on real Kaggle-labeled data<br/>(train_endpoint_anomaly_model.py)"]
+        RF --> GraphOut["is_anomalous + anomaly_probability<br/>returned as diagnostic signal, not an allow/deny gate"]
+    end
 ```
 
 ---
