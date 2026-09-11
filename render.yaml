@@ -6,9 +6,37 @@
     rootDir: bola-benchmark
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    # Persistent disk for demo.db/audit.db - without this, Render's native Python
+    # runtime uses an ephemeral filesystem and every restart/redeploy wipes the
+    # risk-engine state and audit log the SQLite-persistence work exists for.
+    # Requires a paid Render plan; disks aren't available on the free tier.
+    disk:
+      name: bola-data
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
+      - key: DB_DIR
+        value: /app/data
+      # app.py refuses to boot in prod mode until JWT_SECRET/DEMO_PASSWORD/ADMIN_PASSWORD
+      # are all overridden from their dev-only defaults, and until FRONTEND_ORIGIN is set.
+      - key: APP_ENV
+        value: prod
+      - key: JWT_SECRET
+        generateValue: true
+      # Deployer sets these manually in the Render dashboard after first deploy -
+      # generateValue would make them unguessable, defeating a public demo's purpose.
+      # Must NOT equal "changeme123" / "admin_changeme123" or the app refuses to boot.
+      - key: DEMO_PASSWORD
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Render assigns the frontend's real URL only after its first deploy - set this
+      # manually in the dashboard afterward (e.g. https://bola-frontend-dashboard.onrender.com).
+      # Must include the https:// scheme; a bare hostname will never match an Origin header.
+      - key: FRONTEND_ORIGIN
+        sync: false
 
   # 2. React Security & Threat Intelligence Frontend
   - type: web
