@@ -38,6 +38,11 @@ export default function App() {
   const [probeResult, setProbeResult] = useState<any>(null);
   const [isProbing, setIsProbing] = useState(false);
 
+  const [pendingBans, setPendingBans] = useState<string[]>([]);
+  const [approvedBans, setApprovedBans] = useState<string[]>([]);
+
+  const isSecurityAdmin = currentUser?.role === 'security_admin';
+
   // Check saved session on boot via /auth/me
   useEffect(() => {
     const checkSession = async () => {
@@ -126,12 +131,15 @@ export default function App() {
     const subj = subjOverride !== undefined ? subjOverride : (selectedSubject || currentUser.subject || 'alice');
     try {
       const isSecurityAdmin = currentUser.role === 'security_admin';
-      const [statsRes, configRes, riskRes, eventsRes] = await Promise.all([
+      const [statsRes, configRes, riskRes, eventsRes, bansRes] = await Promise.all([
         fetch(`${API_BASE}/stats`),
         fetch(`${API_BASE}/config`),
         fetch(`${API_BASE}/risk/${encodeURIComponent(subj)}`),
         isSecurityAdmin
           ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${currentUser.token}` } })
+          : fetch(`${API_BASE}/events/recent`),
+        isSecurityAdmin
+          ? fetch(`${API_BASE}/admin/pending-bans`, { headers: { Authorization: `Bearer ${currentUser.token}` } })
           : Promise.resolve(null)
       ]);
 
@@ -141,6 +149,11 @@ export default function App() {
       if (eventsRes && eventsRes.ok) {
         const ev = await eventsRes.json();
         setEvents(ev.events || []);
+      }
+      if (bansRes && bansRes.ok) {
+        const bData = await bansRes.json();
+        setPendingBans(bData.pending_bans || []);
+        setApprovedBans(bData.approved_bans || []);
       }
       setIsOnline(true);
     } catch {
@@ -198,7 +211,10 @@ export default function App() {
 
       setSelectedSubject(targetSubject);
       setSubjectInput(targetSubject);
-      await fetch(`${API_BASE}/simulate/${type}`, { method: 'POST' });
+      await fetch(`${API_BASE}/simulate/${type}`, {
+        method: 'POST',
+        headers: currentUser?.token ? { Authorization: `Bearer ${currentUser.token}` } : {}
+      });
       await fetchData(targetSubject);
     } catch (err) {
       console.error(err);
@@ -209,7 +225,10 @@ export default function App() {
   const reset = async () => {
     setIsSimulating(true);
     try {
-      await fetch(`${API_BASE}/reset`, { method: 'POST' });
+      await fetch(`${API_BASE}/reset`, {
+        method: 'POST',
+        headers: currentUser?.token ? { Authorization: `Bearer ${currentUser.token}` } : {}
+      });
       setSelectedSubject('alice');
       setSubjectInput('');
       await fetchData('alice');
@@ -219,14 +238,41 @@ export default function App() {
     setIsSimulating(false);
   };
 
+  const handleApproveBan = async (subject: string) => {
+    if (!currentUser) return;
+    try {
+      await fetch(`${API_BASE}/admin/approve-ban/${encodeURIComponent(subject)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentUser.token}` }
+      });
+      fetchData();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleRejectBan = async (subject: string) => {
+    if (!currentUser) return;
+    try {
+      await fetch(`${API_BASE}/admin/reject-ban/${encodeURIComponent(subject)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentUser.token}` }
+      });
+      fetchData();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleProbe = async () => {
     setIsProbing(true);
     setProbeResult(null);
     try {
+      const pwd = probeActor === 'security_admin' ? 'admin_changeme123' : 'changeme123';
       const loginRes = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: probeActor, password: 'changeme123' })
+        body: JSON.stringify({ subject: probeActor, password: pwd })
       });
       if (!loginRes.ok) {
         setProbeResult({
@@ -239,9 +285,14 @@ export default function App() {
       }
       const { access_token } = await loginRes.json();
 
-      const recRes = await fetch(`${API_BASE}/records/${encodeURIComponent(probeRecordId)}`, {
-        headers: { Authorization: `Bearer ${access_token}` }
-      });
+      const [recRes, graphRes] = await Promise.all([
+        fetch(`${API_BASE}/records/${encodeURIComponent(probeRecordId)}`, {
+          headers: { Authorization: `Bearer ${access_token}` }
+        }),
+        fetch(`${API_BASE}/records/${encodeURIComponent(probeRecordId)}/graph-risk`, {
+          headers: { Authorization: `Bearer ${access_token}` }
+        }).catch(() => null)
+      ]);
 
       const decisionHeader = recRes.headers.get('X-Detector-Decision');
       const signalsHeader = recRes.headers.get('X-Detector-Signals');
@@ -249,6 +300,10 @@ export default function App() {
 
       let body: any = {};
       try { body = await recRes.json(); } catch {}
+      let graphRisk: any = null;
+      if (graphRes && graphRes.ok) {
+        try { graphRisk = await graphRes.json(); } catch {}
+      }
 
       if (recRes.ok) {
         setProbeResult({
@@ -257,7 +312,8 @@ export default function App() {
           decision: decisionHeader || 'allow',
           signals: signalsHeader ? signalsHeader.split(',').filter(Boolean) : [],
           score: scoreHeader || body.score || 0,
-          explanation: body.decision?.explanations?.[0] || 'Access Allowed: Object ownership authorized'
+          explanation: body.decision?.explanations?.[0] || 'Access Allowed: Object ownership authorized',
+          graphRisk
         });
       } else {
         const detail = body.detail || {};
@@ -267,7 +323,8 @@ export default function App() {
           decision: decisionHeader || (detail.outcome === 'blocked' ? 'block' : 'deny'),
           signals: signalsHeader ? signalsHeader.split(',').filter(Boolean) : (detail.signals || []),
           score: scoreHeader || detail.score || 0,
-          explanation: detail.explanations?.[0] || detail.reason || 'BOLA Violation: Unauthorized Object Access Denied'
+          explanation: detail.explanations?.[0] || detail.reason || 'BOLA Violation: Unauthorized Object Access Denied',
+          graphRisk
         });
       }
 
@@ -277,7 +334,7 @@ export default function App() {
       setProbeResult({
         status: 500,
         outcome: 'network_error',
-        explanation: err?.message || 'Connection error to backend'
+        explanation: err.message || 'Connection error to security gateway'
       });
     }
     setIsProbing(false);
@@ -475,6 +532,72 @@ export default function App() {
               </div>
             </div>
           </section>
+
+          {/* Card: Human-in-the-Loop Quarantine Review (Strike 3) */}
+          {(pendingBans.length > 0 || approvedBans.length > 0 || isSecurityAdmin) && (
+            <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="quarantine-review-card">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">⚖️</span>
+                  <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">
+                    QUARANTINE REVIEW (STRIKE 3/3)
+                  </h2>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#262626] text-gray-300 font-semibold">
+                  HUMAN-IN-THE-LOOP
+                </span>
+              </div>
+
+              {pendingBans.length === 0 ? (
+                <div className="p-3.5 rounded-xl bg-[#0A0A0A] border border-[#262626] text-center text-xs font-mono text-gray-400">
+                  No identities currently quarantined in pending approval.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <span className="text-[10px] font-bold text-[#F97316] uppercase tracking-wide block">
+                    PENDING APPROVAL QUEUE ({pendingBans.length})
+                  </span>
+                  {pendingBans.map((subj) => (
+                    <div key={subj} className="p-3 bg-[#201013] border border-[#DC2626]/40 rounded-xl flex items-center justify-between text-xs font-mono">
+                      <div>
+                        <span className="font-bold text-[#FF3B5C]">{subj}</span>
+                        <span className="text-[10px] text-gray-400 block mt-0.5">Quarantined (Strike 3/3 Reached)</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleApproveBan(subj)}
+                          className="px-2.5 py-1 bg-[#FF3B5C] hover:bg-[#e03150] text-black font-bold text-[10px] rounded-lg transition-colors"
+                        >
+                          APPROVE BAN
+                        </button>
+                        <button
+                          onClick={() => handleRejectBan(subj)}
+                          className="px-2 py-1 bg-[#262626] hover:bg-[#333] text-gray-300 font-bold text-[10px] rounded-lg transition-colors"
+                        >
+                          DISMISS
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {approvedBans.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-[#262626]">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide block mb-1.5">
+                    ACTIVE PERMANENT FIREWALL BLACKLIST ({approvedBans.length})
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {approvedBans.map((b) => (
+                      <span key={b} className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/60 border border-red-500/40 text-[#FF3B5C]">
+                        🚫 {b}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
         </div>
         {/* END: LeftColumn */}
 
@@ -663,6 +786,14 @@ export default function App() {
                     ))}
                   </div>
                 )}
+                {probeResult.graphRisk && (
+                  <div className="mt-2 pt-1.5 border-t border-white/10 flex items-center justify-between text-[10px] text-gray-300">
+                    <span className="text-[#A3A3A3]">Model 2 Graph Telemetry:</span>
+                    <span className={`font-bold ${probeResult.graphRisk.is_anomalous ? 'text-[#FF3B5C]' : 'text-emerald-400'}`}>
+                      {(probeResult.graphRisk.anomaly_probability * 100).toFixed(1)}% {probeResult.graphRisk.is_anomalous ? '(Anomalous Mesh)' : '(Normal Mesh)'}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -673,53 +804,70 @@ export default function App() {
         <div className="lg:col-span-4 flex flex-col h-full">
           {/* Card: Audit Timeline (Full Height) */}
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm min-h-[550px] flex flex-col" data-purpose="audit-timeline-card">
-            <div className="flex items-center gap-2 mb-4">
-              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                <path d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" strokeLinecap="round" strokeLinejoin="round"></path>
-              </svg>
-              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">AUDIT TIMELINE</h2>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                  <path d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" strokeLinecap="round" strokeLinejoin="round"></path>
+                </svg>
+                <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">
+                  {isSecurityAdmin ? 'SOC FORENSIC AUDIT LOG' : 'LIVE THREAT TELEMETRY'}
+                </h2>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#262626] text-gray-300 font-semibold">
+                {isSecurityAdmin ? 'DEEP SQL AUDIT' : 'PUBLIC STREAM'}
+              </span>
             </div>
-            {/* Empty State Container or event items */}
-            {currentUser.role !== 'security_admin' ? (
-              <div className="flex-1 flex flex-col items-center justify-center p-6 text-center border border-[#262626] rounded-xl bg-[#0A0A0A]">
-                <div className="w-10 h-10 rounded-full bg-[#201013] border border-[#FF3B5C]/40 flex items-center justify-center mb-3">
-                  <svg className="w-5 h-5 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" strokeLinecap="round" strokeLinejoin="round"></path>
-                  </svg>
-                </div>
-                <h3 className="text-xs font-bold font-sans text-[#F5F5F5] uppercase tracking-wide mb-1">
-                  RESTRICTED FORENSIC LOG
-                </h3>
-                <p className="text-[11px] font-mono text-[#737373] max-w-xs mb-4 leading-relaxed">
-                  Audit events contain cross-tenant forensics and require <span className="text-[#FF3B5C]">security_admin</span> authorization. Currently signed in as <span className="text-[#F5F5F5]">{currentUser.subject}</span> ({currentUser.role}).
-                </p>
+
+            {!isSecurityAdmin && (
+              <div className="mb-3 p-2.5 rounded-xl bg-[#201013] border border-[#FF3B5C]/30 flex items-center justify-between text-[11px] font-mono">
+                <span className="text-gray-300">Signed in as {currentUser.subject}</span>
                 <button
                   type="button"
                   onClick={() => handleLogin('security_admin', 'admin_changeme123')}
-                  className="px-3.5 py-2 rounded-xl bg-[#201013] hover:bg-[#2a1318] border border-[#FF3B5C]/60 hover:border-[#FF3B5C] text-[#FF3B5C] text-xs font-mono font-bold transition-all shadow-xs"
+                  className="text-[#FF3B5C] hover:underline font-bold"
                 >
-                  SWITCH TO SOC ADMIN ➔
+                  Switch to Admin ➔
                 </button>
               </div>
-            ) : events.length === 0 ? (
-              <div className="flex-1 flex items-center justify-center py-20">
+            )}
+
+            {events.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center py-20 text-center">
                 <p className="text-xs font-mono text-[#737373] tracking-wide">
-                  No events recorded.
+                  No security events recorded yet. Run a probe or simulator test to generate live telemetry.
                 </p>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto space-y-2 max-h-[700px] pr-1">
-                {events.map((ev, i) => (
-                  <div key={ev.id || i} className="p-3 bg-[#0A0A0A] border border-[#262626] rounded-xl flex items-center justify-between text-xs font-mono">
-                    <div>
-                      <span className="font-bold text-[#F5F5F5]">{ev.subject_id}</span>
-                      <span className="text-[#737373] ml-2">record #{ev.record_id}</span>
+                {events.map((ev, i) => {
+                  const isBlocked = ev.outcome === 'blocked' || ev.severity === 'CRITICAL';
+                  const isDenied = ev.outcome === 'denied' || ev.severity === 'HIGH';
+                  const badgeClass = isBlocked
+                    ? 'bg-[#201013] text-[#FF3B5C] border border-[#DC2626]/40'
+                    : isDenied
+                    ? 'bg-[#22140c] text-[#F97316] border border-[#F97316]/40'
+                    : 'bg-[#171717] text-[#A3A3A3] border border-[#262626]';
+
+                  return (
+                    <div key={ev.alert_id || ev.id || i} className="p-3 bg-[#0A0A0A] border border-[#262626] rounded-xl flex items-center justify-between text-xs font-mono hover:border-[#333] transition-colors">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-[#F5F5F5]">{ev.attacker_identity || ev.subject_id}</span>
+                          <span className="text-[#737373]">#{ev.targeted_record_id || ev.record_id}</span>
+                          {ev.risk_score !== undefined && (
+                            <span className="text-[10px] text-[#FF3B5C] font-semibold">[{ev.risk_score} pts]</span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-[#A3A3A3] block mt-0.5">
+                          {ev.threat_type || ev.explanation || ev.mitigation_action || 'Access Request'}
+                        </span>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${badgeClass}`}>
+                        {ev.outcome || ev.severity || 'EVENT'}
+                      </span>
                     </div>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${ev.outcome === 'blocked' ? 'bg-[#201013] text-[#FF3B5C] border border-[#DC2626]/40' : ev.outcome === 'denied' ? 'bg-[#22140c] text-[#F97316] border border-[#F97316]/40' : 'bg-[#171717] text-[#A3A3A3] border border-[#262626]'}`}>
-                      {ev.outcome}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

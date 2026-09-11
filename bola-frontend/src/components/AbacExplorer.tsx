@@ -67,6 +67,36 @@ export const AbacExplorer: React.FC<AbacExplorerProps> = ({ apiBase, authToken }
             onChange={(e) => setRecordId(e.target.value)}
             className="w-full bg-[#1F1F1F] border border-[#333] rounded-lg px-3 py-2 text-white focus:outline-hidden focus:border-[#FF3B5C]"
           />
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            <button
+              type="button"
+              onClick={() => setRecordId('1')}
+              className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#262626] hover:bg-[#333] text-gray-300 transition-colors"
+            >
+              #1 Alice
+            </button>
+            <button
+              type="button"
+              onClick={() => setRecordId('8')}
+              className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#262626] hover:bg-[#333] text-gray-300 transition-colors"
+            >
+              #8 Ward A
+            </button>
+            <button
+              type="button"
+              onClick={() => setRecordId('17')}
+              className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#262626] hover:bg-[#333] text-gray-300 transition-colors"
+            >
+              #17 Support
+            </button>
+            <button
+              type="button"
+              onClick={() => setRecordId('55')}
+              className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#262626] hover:bg-[#333] text-gray-300 transition-colors"
+            >
+              #55 Bob
+            </button>
+          </div>
         </div>
         <div>
           <label className="text-[10px] text-[#A3A3A3] uppercase block mb-1">Operator Clearance (0 to 5)</label>

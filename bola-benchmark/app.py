@@ -2131,7 +2131,7 @@ def add_canary_record(
 ) -> dict:
     subject, role, tenant_id = identity
     require_security_admin(role)
-    canary_id = str(payload.get("id", ""))
+    canary_id = str(payload.get("id") or payload.get("canary_id") or "")
     decoy_name = payload.get("decoy_name", "Decoy Trap Record")
     severity = payload.get("severity", "CRITICAL")
     trap_action = payload.get("trap_action", "PERMANENT_BAN")

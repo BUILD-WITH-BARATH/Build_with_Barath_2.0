@@ -55,6 +55,7 @@ export const CanaryMatrix: React.FC<CanaryMatrixProps> = ({
           Authorization: `Bearer ${authToken}`
         },
         body: JSON.stringify({
+          id: newCanaryId.trim(),
           canary_id: newCanaryId.trim(),
           decoy_name: newCanaryName.trim(),
           severity: 'CRITICAL',
