@@ -496,3 +496,12 @@ def test_f9_canary_trip_in_graphql():
     # Attacker 5 is permanently banned
     assert engine._ban_status(DEMO_TENANT_ID, "attacker_5") == "approved"
     assert engine.blocked_until(DEMO_TENANT_ID, "attacker_5") > time.time() + 300000000.0
+
+
+def test_events_stream_sse_broadcast():
+    """SSE endpoint connects and streams initial heartbeat and events."""
+    res = client.get("/events/stream?max_events=1")
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    assert "ping" in res.text
+    assert "connected" in res.text

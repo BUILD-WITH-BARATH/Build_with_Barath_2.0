@@ -31,7 +31,9 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+import asyncio
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -53,6 +55,9 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin_changeme123")
 ADMIN_ROLE = "security_admin"
 DEMO_TENANT_ID = "demo"
 TENANT_SIGNUP_KEY = os.environ.get("TENANT_SIGNUP_KEY", "dev-insecure-signup-key-change-in-production")
+BCRYPT_ROUNDS = int(os.environ.get("BCRYPT_ROUNDS", "4" if APP_ENV in ("dev", "test") else "12"))
+_CACHED_DEMO_HASH = bcrypt.hashpw(DEMO_PASSWORD.encode(), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode()
+_CACHED_ADMIN_HASH = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode()
 
 # --- Dynamic BOLA Weights & Limits (Configurable, no hardcoded magic values) ---
 BOLA_WEIGHT_DELETE = float(os.environ.get("BOLA_WEIGHT_DELETE", "3.0"))
@@ -154,6 +159,13 @@ else:
     _sqlite_file = Path(__file__).parent / "dev.db" if not (DATABASE_URL and ":memory:" in DATABASE_URL) else ":memory:"
     _raw_sqlite = sqlite3.connect(str(_sqlite_file), check_same_thread=False)
     _raw_sqlite.row_factory = sqlite3.Row
+    if str(_sqlite_file) != ":memory:":
+        try:
+            _raw_sqlite.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+    _raw_sqlite.execute("PRAGMA synchronous=NORMAL")
+    _raw_sqlite.execute("PRAGMA busy_timeout=5000")
 
     class SQLiteCursorWrapper:
         def __init__(self, cur):
@@ -415,8 +427,8 @@ def seed_demo_tenant(force: bool = False) -> None:
     """Seeds (or, if force=True, wipes-and-reseeds) ONLY the demo tenant's data.
     Never touches any other tenant - this backs the public demo/dashboard and
     the /reset button, not a database-wide reset."""
-    demo_hash = bcrypt.hashpw(DEMO_PASSWORD.encode(), bcrypt.gensalt()).decode()
-    admin_hash = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
+    demo_hash = _CACHED_DEMO_HASH
+    admin_hash = _CACHED_ADMIN_HASH
 
     with db() as c, c.cursor() as cur:
         if not force:
@@ -1161,7 +1173,7 @@ def register(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "subject and password are required")
     if role == ADMIN_ROLE:
         raise HTTPException(400, f"Cannot self-register with the {ADMIN_ROLE} role")
-    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode()
     with db() as c:
         if c.execute("SELECT 1 FROM users WHERE tenant_id = %s AND id = %s", (DEMO_TENANT_ID, subject)).fetchone():
             raise HTTPException(409, "Subject already registered")
@@ -1201,6 +1213,16 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
 
 
 soc_alerts: list[dict] = []
+_sse_subscribers: list[asyncio.Queue] = []
+
+
+def broadcast_sse_event(event_type: str, data: dict) -> None:
+    msg = {"event": event_type, "data": data, "timestamp": time.time()}
+    for q in list(_sse_subscribers):
+        try:
+            q.put_nowait(msg)
+        except Exception:
+            pass
 
 
 def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score: int, category: str, signals: list[str]) -> dict:
@@ -1228,7 +1250,40 @@ def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score
     if len(soc_alerts) > 50:
         soc_alerts.pop()
 
+    broadcast_sse_event("soc_alert", alert_payload)
     return alert_payload
+
+
+@app.get("/events/stream")
+async def events_stream(request: Request, max_events: int | None = None):
+    async def event_generator():
+        queue = asyncio.Queue()
+        _sse_subscribers.append(queue)
+        events_sent = 0
+        try:
+            yield f"event: ping\ndata: {json.dumps({'status': 'connected', 'time': time.time()})}\n\n"
+            events_sent += 1
+            if max_events and events_sent >= max_events:
+                return
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: {msg['event']}\ndata: {json.dumps(msg['data'])}\n\n"
+                    events_sent += 1
+                    if max_events and events_sent >= max_events:
+                        break
+                except asyncio.TimeoutError:
+                    yield f"event: ping\ndata: {json.dumps({'time': time.time()})}\n\n"
+                    events_sent += 1
+                    if max_events and events_sent >= max_events:
+                        break
+        finally:
+            if queue in _sse_subscribers:
+                _sse_subscribers.remove(queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/healthz")
@@ -2319,10 +2374,13 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     subject = payload.get("subject")
     resource_id = payload.get("resource_id")
     authorized = bool(payload.get("authorized", False))
+    http_verb = str(payload.get("http_verb", "GET")).upper()
     if not subject or resource_id is None:
         raise HTTPException(400, "subject and resource_id are required")
 
-    decision, signals, _unseen, score, category = engine.evaluate(tenant_id, subject, resource_id, authorized, endpoint="v1")
+    decision, signals, _unseen, score, category = engine.evaluate(
+        tenant_id, subject, resource_id, authorized, endpoint="v1", http_verb=http_verb
+    )
     detector_explanations = explain_detector_signals(signals)
 
     outcome = "blocked" if decision == "block" else ("allowed" if authorized else "denied")
@@ -2338,6 +2396,37 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "signals": signals,
         "explanations": detector_explanations,
     }
+
+
+@app.post("/v1/authorize-batch")
+@limiter.limit("200/minute")
+def v1_authorize_batch(request: Request, payload: dict, tenant_id: str = Depends(get_tenant_from_api_key)) -> dict:
+    subject = payload.get("subject")
+    items = payload.get("items", [])
+    if not subject or not isinstance(items, list):
+        raise HTTPException(400, "subject and items array are required")
+    if len(items) > BOLA_MAX_BATCH_SIZE:
+        raise HTTPException(400, f"Batch size cannot exceed {BOLA_MAX_BATCH_SIZE} items")
+
+    results = []
+    blocked_mid_batch = False
+    for item in items:
+        rid = str(item.get("resource_id", ""))
+        auth = bool(item.get("authorized", False))
+        verb = str(item.get("http_verb", "GET")).upper()
+        if engine.blocked_until(tenant_id, subject) > time.time():
+            blocked_mid_batch = True
+            results.append({"resource_id": rid, "decision": "block", "score": 100, "signals": ["temporarily_blocked"]})
+            continue
+
+        dec, sigs, _u, sc, cat = engine.evaluate(tenant_id, subject, rid, auth, endpoint="v1_batch", http_verb=verb)
+        if dec == "block":
+            blocked_mid_batch = True
+            dispatch_soc_alert(tenant_id, subject, rid, sc, cat, sigs)
+        final_dec = "block" if dec == "block" else ("allow" if auth else "deny")
+        results.append({"resource_id": rid, "decision": final_dec, "score": sc, "signals": sigs})
+
+    return {"total": len(items), "blocked_mid_batch": blocked_mid_batch, "results": results}
 
 
 def ensure_database() -> None:

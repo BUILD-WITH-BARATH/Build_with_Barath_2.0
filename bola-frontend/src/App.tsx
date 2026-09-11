@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { LoginView } from './LoginView';
+import { CanaryAlertBanner } from './components/CanaryAlertBanner';
+import { AdvancedDefenseLab } from './components/AdvancedDefenseLab';
+import { AbacExplorer } from './components/AbacExplorer';
+import { CanaryMatrix } from './components/CanaryMatrix';
 
 const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
@@ -15,6 +19,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const [activeMainTab, setActiveMainTab] = useState<'radar' | 'lab' | 'abac' | 'canary'>('radar');
+  const [activeCanaryAlert, setActiveCanaryAlert] = useState<any | null>(null);
 
   const [stats, setStats] = useState<any>(null);
   const [config, setConfig] = useState<any>(null);
@@ -148,6 +155,37 @@ export default function App() {
     }, 2500);
     return () => clearInterval(timer);
   }, [fetchData, currentUser]);
+
+  // Real-time SSE event subscriber for instant honeypot and SOC alert push
+  useEffect(() => {
+    if (!currentUser) return;
+    const es = new EventSource(`${API_BASE}/events/stream`);
+    es.addEventListener('soc_alert', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        setActiveCanaryAlert(payload);
+        fetchData();
+      } catch {}
+    });
+    es.addEventListener('canary_trip', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        setActiveCanaryAlert({
+          alert_id: `CANARY-${Date.now().toString().slice(-4)}`,
+          threat_type: 'CRITICAL_CANARY_TRIP',
+          attacker_identity: payload.subject,
+          targeted_record_id: payload.canary_id,
+          risk_score: 100,
+          strike_level: 'Strike 3/3',
+          mitigation_action: 'PERMANENT_FIREWALL_BLACKLIST'
+        });
+        fetchData();
+      } catch {}
+    });
+    return () => {
+      es.close();
+    };
+  }, [currentUser, fetchData]);
 
   const simulate = async (type: string) => {
     setIsSimulating(true);
@@ -327,10 +365,50 @@ export default function App() {
       </header>
       {/* END: MainHeader */}
 
-      {/* BEGIN: MainContentGrid */}
-      <main className="flex-1 max-w-[1720px] w-full mx-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* BEGIN: LeftColumn (Width 4 of 12) */}
-        <div className="lg:col-span-4 flex flex-col gap-5">
+      {/* Live Honeypot Alert Banner */}
+      <CanaryAlertBanner alert={activeCanaryAlert} onDismiss={() => setActiveCanaryAlert(null)} />
+
+      {/* Navigation Subheader Tabs */}
+      <div className="bg-[#141414] border-b border-[#262626] px-6 py-2.5 flex items-center gap-2 font-mono text-xs overflow-x-auto scrollbar-none">
+        {[
+          { id: 'radar', label: 'THREAT RADAR & PROBE', icon: '📡' },
+          { id: 'lab', label: 'ADVANCED BOLA LAB (9 VECTORS)', icon: '⚔️' },
+          { id: 'abac', label: 'DYNAMIC ABAC & REDACTION', icon: '🛡️' },
+          { id: 'canary', label: 'HONEYPOT CANARY MATRIX', icon: '🪤' },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveMainTab(tab.id as any)}
+            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center gap-2 ${
+              activeMainTab === tab.id
+                ? 'bg-[#FF3B5C] text-black font-bold shadow-xs'
+                : 'bg-[#1E1E1E] text-[#A3A3A3] hover:text-white hover:bg-[#282828]'
+            }`}
+          >
+            <span>{tab.icon}</span>
+            <span>{tab.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* BEGIN: MainContent */}
+      <main className="flex-1 max-w-[1720px] w-full mx-auto p-5">
+        {activeMainTab === 'lab' && (
+          <AdvancedDefenseLab apiBase={API_BASE} authToken={currentUser.token} onRefreshTelemetry={() => fetchData(selectedSubject)} />
+        )}
+
+        {activeMainTab === 'abac' && (
+          <AbacExplorer apiBase={API_BASE} authToken={currentUser.token} />
+        )}
+
+        {activeMainTab === 'canary' && (
+          <CanaryMatrix apiBase={API_BASE} authToken={currentUser.token} currentUserRole={currentUser.role} />
+        )}
+
+        {activeMainTab === 'radar' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* BEGIN: LeftColumn (Width 4 of 12) */}
+            <div className="lg:col-span-4 flex flex-col gap-5">
           {/* Card: Security Overview */}
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="security-overview-card">
             <div className="flex items-center gap-2 mb-4">
@@ -641,8 +719,10 @@ export default function App() {
           </section>
         </div>
         {/* END: RightColumn */}
+          </div>
+        )}
       </main>
-      {/* END: MainContentGrid */}
+      {/* END: MainContent */}
     </>
   );
 }

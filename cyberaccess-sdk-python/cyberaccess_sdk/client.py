@@ -93,6 +93,52 @@ class CyberAccessClient:
             )
         return result
 
+    def authorize_mutation(self, subject: str, resource_id: str, authorized: bool, http_verb: str = "PUT") -> AuthorizeResult:
+        """Evaluates write/mutation actions (PUT, PATCH, DELETE) with verb-weighted risk penalties."""
+        try:
+            response = self._client.post(
+                f"{self.base_url}/v1/authorize",
+                json={"subject": subject, "resource_id": str(resource_id), "authorized": authorized, "http_verb": http_verb},
+                headers={"X-API-Key": self.api_key},
+            )
+            response.raise_for_status()
+            body = response.json()
+            return AuthorizeResult(
+                decision=body["decision"], score=body["score"], category=body["category"],
+                signals=body.get("signals", []), explanations=body.get("explanations", []),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise ValueError("Invalid CyberAccess API key") from exc
+            return self._fallback(authorized)
+        except httpx.RequestError:
+            return self._fallback(authorized)
+
+    def authorize_batch(self, subject: str, items: list[dict]) -> dict:
+        """Evaluates an array of resource requests with atomic batch limits and mid-batch blocking."""
+        try:
+            response = self._client.post(
+                f"{self.base_url}/v1/authorize-batch",
+                json={"subject": subject, "items": items},
+                headers={"X-API-Key": self.api_key},
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise ValueError("Invalid CyberAccess API key") from exc
+            if self.fail_open:
+                return {"total": len(items), "blocked_mid_batch": False,
+                        "results": [{"resource_id": str(i.get("resource_id")), "decision": "allow" if i.get("authorized") else "deny", "score": 0, "signals": []} for i in items]}
+            return {"total": len(items), "blocked_mid_batch": False,
+                    "results": [{"resource_id": str(i.get("resource_id")), "decision": "deny", "score": 0, "signals": []} for i in items]}
+        except httpx.RequestError:
+            if self.fail_open:
+                return {"total": len(items), "blocked_mid_batch": False,
+                        "results": [{"resource_id": str(i.get("resource_id")), "decision": "allow" if i.get("authorized") else "deny", "score": 0, "signals": []} for i in items]}
+            return {"total": len(items), "blocked_mid_batch": False,
+                    "results": [{"resource_id": str(i.get("resource_id")), "decision": "deny", "score": 0, "signals": []} for i in items]}
+
     def close(self) -> None:
         self._client.close()
 

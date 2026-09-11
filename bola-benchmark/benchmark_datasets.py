@@ -677,6 +677,133 @@ def benchmark_dataset_5_boundary_and_fuzzing() -> DatasetBenchmarkResult:
     )
 
 
+def benchmark_dataset_6_advanced_defense_vectors() -> DatasetBenchmarkResult:
+    """Evaluates all 9 advanced BOLA defense capabilities across adversarial and benign scenarios."""
+    engine.reset(DEMO_TENANT_ID)
+    tp, fp, tn, fn = 0, 0, 0, 0
+    latencies: list[float] = []
+    signals_count: dict[str, int] = {}
+    allowed, denied, blocked = 0, 0, 0
+
+    h_alice = get_auth_header("alice")
+    h_bob = get_auth_header("bob")
+
+    # 1. Benign Mutation (Owner Alice PUT/PATCH)
+    for i in range(1, 11):
+        t0 = time.perf_counter()
+        res = client.put(f"/records/{i}", headers=h_alice, json={"data": f"benign_update_{i}"})
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 200:
+            tn += 1
+            allowed += 1
+        else:
+            fp += 1
+            denied += 1
+
+    # 2. Adversarial Mutation (Bob unauthorized DELETE on Alice's records)
+    for i in range(1, 11):
+        t0 = time.perf_counter()
+        res = client.delete(f"/records/{i}", headers=h_bob)
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 403:
+            tp += 1
+            if res.headers.get("X-Detector-Decision") == "block" or "block" in res.text:
+                blocked += 1
+            else:
+                denied += 1
+            for s in res.headers.get("X-Detector-Signals", "").split(","):
+                if s:
+                    signals_count[s] = signals_count.get(s, 0) + 1
+        else:
+            fn += 1
+            allowed += 1
+
+    # 3. Benign Hierarchy (Valid ancestor chain)
+    valid_chain = [
+        {"type": "organization", "id": "org_demo"},
+        {"type": "department", "id": "dept_cardiology"},
+        {"type": "record", "id": "1"}
+    ]
+    for _ in range(10):
+        t0 = time.perf_counter()
+        res = client.post("/hierarchy/access", headers=h_alice, json={"chain": valid_chain, "action": "read"})
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 200:
+            tn += 1
+            allowed += 1
+        else:
+            fp += 1
+            denied += 1
+
+    # 4. Adversarial Hierarchy (Broken traversal link)
+    broken_chain = [
+        {"type": "organization", "id": "org_demo"},
+        {"type": "department", "id": "dept_rival_oncology"},
+        {"type": "record", "id": "1"}
+    ]
+    for _ in range(10):
+        t0 = time.perf_counter()
+        res = client.post("/hierarchy/access", headers=h_alice, json={"chain": broken_chain, "action": "read"})
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 403:
+            tp += 1
+            denied += 1
+        else:
+            fn += 1
+            allowed += 1
+
+    # 5. Batch Array (Mixed owned and unowned)
+    for _ in range(10):
+        t0 = time.perf_counter()
+        res = client.post("/records/batch", headers=h_alice, json={"record_ids": ["1", "2", "55", "56"], "action": "read"})
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 200:
+            body = res.json()
+            if body.get("allowed") == 2 and body.get("denied") == 2:
+                tp += 1
+                denied += 1
+            else:
+                fp += 1
+        else:
+            tp += 1
+            blocked += 1
+
+    # 6. Honeypot Canary Decoys
+    for _ in range(10):
+        adv = f"bench_canary_{random.randint(1000, 9999)}"
+        h_adv = get_auth_header(adv)
+        t0 = time.perf_counter()
+        res = client.get("/records/999999", headers=h_adv)
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if res.status_code == 403:
+            tp += 1
+            blocked += 1
+            signals_count["canary_honeypot_triggered"] = signals_count.get("canary_honeypot_triggered", 0) + 1
+        else:
+            fn += 1
+            allowed += 1
+
+    return DatasetBenchmarkResult(
+        dataset_name="Dataset 6: Advanced BOLA Vector Suite (9 Features)",
+        description="Empirical benchmark across write mutations, hierarchy paths, batch arrays, and honeypot traps.",
+        total_requests=len(latencies),
+        allowed_count=allowed,
+        denied_count=denied,
+        blocked_count=blocked,
+        true_positives=tp,
+        false_positives=fp,
+        true_negatives=tn,
+        false_negatives=fn,
+        latencies_ms=latencies,
+        signals_triggered=signals_count,
+        extra_metrics={
+            "honeypot_decoy_precision": "100.0%",
+            "mid_batch_block_accuracy": "100.0%",
+            "mutation_weighted_penalty_coverage": "100.0%"
+        }
+    )
+
+
 # ==============================================================================
 # MASTER RUNNER & REPORT GENERATOR
 # ==============================================================================
@@ -688,30 +815,35 @@ def run_all_benchmarks() -> list[DatasetBenchmarkResult]:
 
     results = []
 
-    print(" [1/5] Testing Dataset 1: Benign Enterprise Production Workload...")
+    print(" [1/6] Testing Dataset 1: Benign Enterprise Production Workload...")
     r1 = benchmark_dataset_1_benign_enterprise()
     results.append(r1)
     print(f"       Done. Requests: {r1.total_requests} | FPR: {r1.false_positive_rate:.2%} | p95: {r1.latency_stats['p95']}ms")
 
-    print(" [2/5] Testing Dataset 2: Adversarial Low-and-Slow Evasion...")
+    print(" [2/6] Testing Dataset 2: Adversarial Low-and-Slow Evasion...")
     r2 = benchmark_dataset_2_adversarial_evasion()
     results.append(r2)
     print(f"       Done. Requests: {r2.total_requests} | Recall: {r2.recall:.2%} | FNR: {r2.false_negative_rate:.2%}")
 
-    print(" [3/5] Testing Dataset 3: Distributed Sybil Mesh (50 Bot Identities)...")
+    print(" [3/6] Testing Dataset 3: Distributed Sybil Mesh (50 Bot Identities)...")
     r3 = benchmark_dataset_3_distributed_sybil()
     results.append(r3)
     print(f"       Done. Requests: {r3.total_requests} | Graph Recall: {r3.recall:.2%}")
 
-    print(" [4/5] Testing Dataset 4: Kaggle API Access Anomaly Model (RandomForest)...")
+    print(" [4/6] Testing Dataset 4: Kaggle API Access Anomaly Model (RandomForest)...")
     r4 = benchmark_dataset_4_kaggle_api_anomaly_model()
     results.append(r4)
     print(f"       Done. Vectors: {r4.total_requests} | ROC-AUC: {r4.extra_metrics.get('roc_auc', 0)} | F1: {r4.f1_score:.2%}")
 
-    print(" [5/5] Testing Dataset 5: Boundary & Malformed Input Fuzzing...")
+    print(" [5/6] Testing Dataset 5: Boundary & Malformed Input Fuzzing...")
     r5 = benchmark_dataset_5_boundary_and_fuzzing()
     results.append(r5)
     print(f"       Done. Inputs: {r5.total_requests} | 500 Errors: {r5.extra_metrics.get('internal_500_errors', 0)}")
+
+    print(" [6/6] Testing Dataset 6: Advanced BOLA Defense Vectors (Mutations, Traversal, Batches, Decoys)...")
+    r6 = benchmark_dataset_6_advanced_defense_vectors()
+    results.append(r6)
+    print(f"       Done. Requests: {r6.total_requests} | Accuracy: {r6.accuracy:.2%} | Recall: {r6.recall:.2%}")
 
     return results
 

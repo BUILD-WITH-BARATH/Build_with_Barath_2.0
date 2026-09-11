@@ -98,3 +98,31 @@ def test_authorize_or_raise_does_not_raise_on_deny():
     client = CyberAccessClient(api_key="sk_test", base_url=BASE)
     result = client.authorize_or_raise("bob", "record-1", authorized=False)
     assert result.decision == "deny"
+
+
+@respx.mock
+def test_authorize_mutation_passes_http_verb():
+    route = respx.post(f"{BASE}/v1/authorize").mock(
+        return_value=httpx.Response(200, json={"decision": "block", "score": 75, "category": "Attack", "signals": ["unauthorized_write_delete_attempt"]})
+    )
+    client = CyberAccessClient(api_key="sk_test", base_url=BASE)
+    result = client.authorize_mutation("attacker", "record-1", authorized=False, http_verb="DELETE")
+    assert result.blocked
+    assert result.score == 75
+    assert "unauthorized_write_delete_attempt" in result.signals
+
+
+@respx.mock
+def test_authorize_batch_evaluates_items():
+    respx.post(f"{BASE}/v1/authorize-batch").mock(
+        return_value=httpx.Response(200, json={
+            "total": 2, "blocked_mid_batch": False,
+            "results": [{"resource_id": "1", "decision": "allow", "score": 0, "signals": []},
+                        {"resource_id": "2", "decision": "deny", "score": 25, "signals": []}]
+        })
+    )
+    client = CyberAccessClient(api_key="sk_test", base_url=BASE)
+    batch_res = client.authorize_batch("alice", [{"resource_id": "1", "authorized": True}, {"resource_id": "2", "authorized": False}])
+    assert batch_res["total"] == 2
+    assert len(batch_res["results"]) == 2
+    assert batch_res["results"][0]["decision"] == "allow"
