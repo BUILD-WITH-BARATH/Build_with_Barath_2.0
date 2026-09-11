@@ -6,6 +6,19 @@ export default {
   ],
   theme: {
     extend: {
+      colors: {
+        brand: {
+          dark: '#0A0A0A',
+          card: '#171717',
+          border: '#262626',
+          crimson: '#FF3B5C',
+          deepred: '#DC2626',
+          orange: '#F97316',
+          light: '#F5F5F5',
+          muted: '#A3A3A3',
+          subtle: '#737373',
+        },
+      },
       fontFamily: {
         sans: ['"Outfit"', '"Plus Jakarta Sans"', 'system-ui', '-apple-system', 'sans-serif'],
         display: ['"Space Grotesk"', '"Outfit"', 'sans-serif'],

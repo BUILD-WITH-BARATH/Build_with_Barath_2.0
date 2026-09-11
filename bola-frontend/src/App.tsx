@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
 import { 
-  Shield, 
-  ShieldAlert, 
-  Wifi, 
-  WifiOff, 
-  Users, 
-  Database, 
+  Shield,
+  ShieldAlert,
+  Wifi,
+  WifiOff,
+  Database,
   Zap, 
   RefreshCw, 
   Clock, 
@@ -19,9 +18,8 @@ import {
   LayoutDashboard, 
   Flame, 
   AlertOctagon, 
-  Fingerprint, 
-  TrendingUp, 
-  Workflow, 
+  Fingerprint,
+  Workflow,
   Lock, 
   Play, 
   RotateCcw,
@@ -84,6 +82,7 @@ export default function App() {
   const [auditFilter, setAuditFilter] = useState<'all' | 'blocked' | 'denied' | 'allowed'>('all');
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedEventDetail, setSelectedEventDetail] = useState<any | null>(null);
+  const [overviewSearch, setOverviewSearch] = useState('');
 
   // Real login: the JWT lives only in memory (React state), never localStorage,
   // and is the *logged-in user's own* token - not a hardcoded admin credential.
@@ -306,8 +305,8 @@ export default function App() {
 
   if (!authToken) {
     return (
-      <div className="min-h-screen bg-[#090D16] text-slate-100 font-sans flex items-center justify-center px-4">
-        <form onSubmit={handleLogin} className="w-full max-w-sm bg-[#0E1424]/95 border border-slate-800/80 rounded-3xl p-8 shadow-2xl space-y-5">
+      <div className="min-h-screen bg-brand-dark text-slate-100 font-sans flex items-center justify-center px-4">
+        <form onSubmit={handleLogin} className="w-full max-w-sm bg-brand-card/95 border border-brand-border rounded-3xl p-8 shadow-2xl space-y-5">
           <div className="text-center space-y-1">
             <ShieldCheck className="w-8 h-8 mx-auto text-cyan-400" />
             <h1 className="font-display font-bold text-lg text-white">CyberAccess SOC Login</h1>
@@ -348,7 +347,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#090D16] text-slate-100 font-sans selection:bg-indigo-500/25 selection:text-white flex flex-col antialiased bg-cyber-grid">
+    <div className="min-h-screen bg-brand-dark text-slate-100 font-sans selection:bg-indigo-500/25 selection:text-white flex flex-col antialiased bg-cyber-grid">
 
       {/* Cyber Screen Laser Scanline & Chromatic Flash Sweep */}
       <div key={`flash-${currentTab}`} className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
@@ -366,7 +365,7 @@ export default function App() {
       <div className="flex-1 flex relative z-10">
         
         {/* Modern Left Sidebar Navigation Dock */}
-        <aside className="w-20 lg:w-72 bg-[#0E1424]/95 backdrop-blur-2xl border-r border-slate-800/80 p-5 lg:p-6 flex flex-col justify-between hidden sm:flex shrink-0 min-h-screen overflow-y-auto">
+        <aside className="w-20 lg:w-72 bg-brand-card/95 backdrop-blur-2xl border-r border-brand-border p-5 lg:p-6 flex flex-col justify-between hidden sm:flex shrink-0 min-h-screen overflow-y-auto">
           <div className="space-y-6">
             
             {/* App Brand Header */}
@@ -480,8 +479,8 @@ export default function App() {
           </div>
 
           {/* Sidebar Status Footer Widget */}
-          <div className="hidden lg:block mt-8 pt-5 border-t border-slate-800/80">
-            <div className="bg-gradient-to-b from-slate-900/90 to-slate-950/90 rounded-3xl p-5 border border-slate-800/90 shadow-xl relative overflow-hidden group hover:border-slate-700 transition-colors">
+          <div className="hidden lg:block mt-8 pt-5 border-t border-brand-border">
+            <div className="bg-gradient-to-b from-slate-900/90 to-slate-950/90 rounded-3xl p-5 border border-brand-border shadow-xl relative overflow-hidden group hover:border-slate-700 transition-colors">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-xs font-display font-bold text-white flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
@@ -494,7 +493,7 @@ export default function App() {
               <p className="text-[11px] text-slate-400 font-sans leading-relaxed mb-3">
                 Deterministic SQL authorization with real-time sliding graph telemetry.
               </p>
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-300 bg-slate-950/80 px-3 py-2 rounded-xl border border-slate-800/80">
+              <div className="flex items-center justify-between text-[11px] font-mono text-slate-300 bg-slate-950/80 px-3 py-2 rounded-xl border border-brand-border">
                 <span>Port: 8000</span>
                 <span className="text-cyan-400 font-bold">Connected</span>
               </div>
@@ -506,7 +505,7 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0">
           
           {/* Top Navigation Header */}
-          <header className="px-6 lg:px-10 py-5 flex items-center justify-between border-b border-slate-800/70 bg-[#090D16]/85 backdrop-blur-2xl sticky top-0 z-40">
+          <header className="px-6 lg:px-10 py-5 flex items-center justify-between border-b border-brand-border bg-brand-dark/85 backdrop-blur-2xl sticky top-0 z-40">
             <div>
               <div className="flex items-center gap-3">
                 <h1 className="text-xl lg:text-2xl font-black text-white tracking-tight capitalize font-display">
@@ -564,7 +563,7 @@ export default function App() {
           <main key={currentTab} className="p-6 lg:p-10 flex-1 max-w-[1700px] mx-auto w-full animate-cyber-glitch">
             
             {/* HUD status stream badge */}
-            <div className="mb-6 flex items-center justify-between text-[11px] font-mono text-slate-400 border-b border-slate-800/60 pb-2">
+            <div className="mb-6 flex items-center justify-between text-[11px] font-mono text-slate-400 border-b border-brand-border pb-2">
               <div className="flex items-center gap-2 text-slate-300">
                 <span className="inline-block w-2 h-2 bg-cyan-400 rounded-sm animate-pulse"></span>
                 <span>STREAM_ID: 0x{currentTab.toUpperCase()}::SEC_NODE_01</span>
@@ -578,361 +577,227 @@ export default function App() {
             
             {/* TAB 1: SECURITY HUB (OVERVIEW) */}
             {currentTab === 'overview' && (
-              <div className="space-y-8 animate-in fade-in duration-300">
-                
-                {/* Hero Bento Stat Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-                  
-                  {/* Card 1: Active Subjects */}
-                  <div 
-                    onClick={() => setCurrentTab('risk')}
-                    className="bg-[#12192C] border border-slate-800/90 rounded-[28px] p-7 shadow-2xl relative overflow-hidden group hover:border-indigo-500/40 hover:shadow-indigo-500/10 cursor-pointer transition-all duration-300 flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-4 mb-6">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Active Subjects</span>
-                        <div className="w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0 group-hover:scale-110 transition-transform">
-                          <Users className="w-6 h-6" />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 mb-3">
-                        <span className="text-5xl font-black font-display text-white tracking-tight">{stats?.active_subjects || 0}</span>
-                        <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-500/15 border border-indigo-500/30 px-3 py-1 rounded-full flex items-center gap-1.5 shrink-0">
-                          <TrendingUp className="w-3.5 h-3.5" /> Monitored
-                        </span>
-                      </div>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start animate-in fade-in duration-300">
+
+                {/* LEFT COLUMN: Security Overview + System Config */}
+                <div className="lg:col-span-4 flex flex-col gap-5">
+                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Shield className="w-4 h-4 text-brand-crimson" />
+                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Security Overview</h2>
                     </div>
-                    <p className="text-xs text-slate-400 font-sans mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between">
-                      <span>Unique traffic subjects</span>
-                      <ChevronRight className="w-4 h-4 text-slate-500 group-hover:translate-x-1 transition-transform shrink-0" />
-                    </p>
-                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-indigo-500 to-transparent"></div>
-                  </div>
-
-                  {/* Card 2: Blocked Subjects */}
-                  <div 
-                    onClick={() => setCurrentTab('audit')}
-                    className="bg-[#12192C] border border-slate-800/90 rounded-[28px] p-7 shadow-2xl relative overflow-hidden group hover:border-rose-500/40 hover:shadow-rose-500/10 cursor-pointer transition-all duration-300 flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-4 mb-6">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Blocked Subjects</span>
-                        <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0 group-hover:scale-110 transition-transform">
-                          <ShieldAlert className="w-6 h-6" />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 mb-3">
-                        <span className="text-5xl font-black font-display text-rose-400 tracking-tight">{stats?.blocked_subjects || 0}</span>
-                        <span className="text-xs font-mono font-bold text-rose-400 bg-rose-500/15 border border-rose-500/30 px-3 py-1 rounded-full flex items-center gap-1.5 shrink-0">
-                          <AlertOctagon className="w-3.5 h-3.5" /> Isolated
-                        </span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-slate-400 font-sans mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between">
-                      <span>High risk automated blocks</span>
-                      <ChevronRight className="w-4 h-4 text-slate-500 group-hover:translate-x-1 transition-transform shrink-0" />
-                    </p>
-                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 to-transparent"></div>
-                  </div>
-
-                  {/* Card 3: Coordinated Attacks */}
-                  <div 
-                    onClick={() => setCurrentTab('simulator')}
-                    className="bg-[#12192C] border border-slate-800/90 rounded-[28px] p-7 shadow-2xl relative overflow-hidden group hover:border-cyan-500/40 hover:shadow-cyan-500/10 cursor-pointer transition-all duration-300 flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-4 mb-6">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Coordinated Attacks</span>
-                        <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0 group-hover:scale-110 transition-transform">
-                          <Radio className="w-6 h-6 animate-pulse" />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 mb-3">
-                        <span className="text-5xl font-black font-display text-cyan-400 tracking-tight">
-                          {Object.keys(stats?.coordinated_attacks || {}).length}
-                        </span>
-                        <span className="text-xs font-mono font-bold text-cyan-400 bg-cyan-500/15 border border-cyan-500/30 px-3 py-1 rounded-full flex items-center gap-1.5 shrink-0">
-                          <ShieldCheck className="w-3.5 h-3.5" /> Sybil Radar
-                        </span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-slate-400 font-sans mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between">
-                      <span>Multi-subject cluster attacks</span>
-                      <ChevronRight className="w-4 h-4 text-slate-500 group-hover:translate-x-1 transition-transform shrink-0" />
-                    </p>
-                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 to-transparent"></div>
-                  </div>
-
-                  {/* Card 4: Quick Vector Launch */}
-                  <div className="bg-gradient-to-br from-slate-900 via-[#12192C] to-[#12192C] border border-slate-800/90 rounded-[28px] p-7 shadow-2xl relative overflow-hidden flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between gap-4 mb-6">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Quick Vector</span>
-                        <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0">
-                          <Flame className="w-6 h-6" />
-                        </div>
-                      </div>
-                      <h3 className="text-lg font-bold font-display text-white mb-1">Rapid BOLA Attack</h3>
-                      <p className="text-xs text-slate-400 font-sans leading-relaxed">4+ unique unauthorized requests in &lt; 30s</p>
-                    </div>
-                    <button 
-                      disabled={isSimulating}
-                      onClick={() => simulate('rapid')}
-                      className="mt-6 w-full py-3.5 px-4 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-display font-bold text-xs rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 active:scale-95 disabled:opacity-50"
-                    >
-                      <Zap className="w-4 h-4 fill-current shrink-0" />
-                      <span>Inject Rapid Vector</span>
-                    </button>
-                  </div>
-
-                </div>
-
-                {/* Overview Middle Bento Section */}
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-                  
-                  {/* Left: Quick Subject Threat Card (7 cols) */}
-                  <div className="xl:col-span-7 bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl relative overflow-hidden">
-                    <div className="flex items-center justify-between mb-6">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-                          <Activity className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h2 className="text-base font-display font-bold text-white">Active Threat Meter</h2>
-                          <p className="text-xs text-slate-400 font-sans">Subject: <span className="font-mono text-cyan-300 font-bold">{selectedSubject || 'alice'}</span></p>
-                        </div>
-                      </div>
-
+                    <div className="grid grid-cols-2 gap-3 mb-3">
                       <button
                         onClick={() => setCurrentTab('risk')}
-                        className="flex items-center gap-1.5 text-xs font-bold text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 px-3 py-1.5 rounded-xl border border-cyan-500/25 transition-all font-sans"
+                        className="text-left bg-brand-dark border border-brand-border rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-crimson/50 transition-colors"
                       >
-                        <span>Deep Analysis</span>
-                        <ChevronRight className="w-3.5 h-3.5" />
+                        <span className="text-2xl font-bold text-brand-light leading-none">{stats?.active_subjects ?? 0}</span>
+                        <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide mt-3">Active Subjects</span>
+                      </button>
+                      <button
+                        onClick={() => setCurrentTab('audit')}
+                        className="text-left bg-[#201013] border border-brand-deepred/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-crimson/60 transition-colors"
+                      >
+                        <span className="text-2xl font-bold text-brand-crimson leading-none">{stats?.blocked_subjects ?? 0}</span>
+                        <span className="text-[10px] font-bold text-brand-deepred uppercase tracking-wide mt-3">Blocked Subjects</span>
                       </button>
                     </div>
+                    <button
+                      onClick={() => setCurrentTab('simulator')}
+                      className="text-left w-full bg-[#22140c] border border-brand-orange/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-orange/70 transition-colors"
+                    >
+                      <span className="text-2xl font-bold text-brand-orange leading-none">{Object.keys(stats?.coordinated_attacks || {}).length}</span>
+                      <span className="text-[10px] font-bold text-brand-orange uppercase tracking-wide mt-3">Coordinated Attacks Detected</span>
+                    </button>
+                  </section>
 
-                    {/* Threat Score Banner */}
-                    <div className={cn(
-                      "p-6 rounded-3xl border bg-gradient-to-r transition-all duration-300 mb-6 flex flex-col sm:flex-row items-center justify-between gap-6",
-                      currentTheme.bgGradient,
-                      currentTheme.border,
-                      currentTheme.glow
-                    )}>
-                      <div className="flex items-center gap-6">
-                        <div className="text-center">
-                          <div className={cn("text-6xl font-black font-display tracking-tight", currentTheme.text)}>
-                            {riskData?.score || 0}
-                          </div>
-                          <div className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest mt-1">
-                            SCORE / 100
-                          </div>
+                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Workflow className="w-4 h-4 text-brand-crimson" />
+                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">System Config</h2>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <span className="block text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1.5">Short Window</span>
+                        <div className="bg-brand-dark border border-brand-border rounded-xl py-2 px-3 flex items-center gap-2">
+                          <Clock className="w-3.5 h-3.5 text-brand-crimson" />
+                          <span className="text-xs font-semibold text-brand-light">{config?.short_window ?? 0}s</span>
                         </div>
-
-                        <div className="h-16 w-[1px] bg-slate-700/60 hidden sm:block"></div>
-
-                        <div>
-                          <div className="text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-1.5">Assessment</div>
-                          <div className={cn("inline-flex px-3.5 py-1 rounded-xl text-xs font-black font-mono uppercase tracking-wide border", currentTheme.badge)}>
-                            {riskData?.category || 'NORMAL'}
-                          </div>
-                          {riskData?.score >= 90 && (
-                            <div className="text-xs font-bold text-rose-400 mt-2 flex items-center gap-1.5 font-sans">
-                              <AlertOctagon className="w-4 h-4" /> BOLA BLOCK ACTIVE
-                            </div>
-                          )}
-                        </div>
+                        <span className="block text-[10px] text-brand-subtle mt-1 font-mono">Threshold: {config?.rapid_threshold ?? 0} uniq</span>
                       </div>
+                      <div>
+                        <span className="block text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1.5">Long Window</span>
+                        <div className="bg-brand-dark border border-brand-border rounded-xl py-2 px-3 flex items-center gap-2">
+                          <Clock className="w-3.5 h-3.5 text-brand-orange" />
+                          <span className="text-xs font-semibold text-brand-light">{config?.long_window ?? 0}s</span>
+                        </div>
+                        <span className="block text-[10px] text-brand-subtle mt-1 font-mono">Threshold: {config?.slow_threshold ?? 0} uniq</span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
 
-                      {/* Quick subject select pills */}
-                      <div className="flex flex-wrap gap-2 justify-end max-w-xs">
-                        {['alice', 'dr_singh', 'attacker_1', 'attacker_slow', 'sybil_1'].map(subj => (
-                          <button
-                            key={subj}
-                            onClick={() => setSelectedSubject(subj)}
-                            className={cn(
-                              "px-2.5 py-1 rounded-lg text-xs font-mono transition-all border",
-                              selectedSubject === subj 
-                                ? "bg-cyan-500 text-slate-950 font-bold border-cyan-400 shadow-sm shadow-cyan-500/25" 
-                                : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white"
-                            )}
-                          >
-                            {subj}
-                          </button>
+                {/* CENTER COLUMN: Live Risk Monitor + Live Simulator */}
+                <div className="lg:col-span-4 flex flex-col gap-5">
+                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
+                    <div className="flex items-center justify-between gap-2 mb-4">
+                      <div className="flex items-center gap-2">
+                        <Activity className="w-4 h-4 text-brand-crimson" />
+                        <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Live Risk Monitor</h2>
+                      </div>
+                      <div className="relative w-40">
+                        <input
+                          className="w-full bg-brand-dark border border-brand-border text-brand-light placeholder-brand-subtle text-xs rounded-lg py-1 px-2.5 focus:outline-none focus:ring-1 focus:ring-brand-crimson focus:border-brand-crimson transition-colors"
+                          placeholder="Type a subject ID..."
+                          type="text"
+                          value={overviewSearch}
+                          onChange={(e) => setOverviewSearch(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && overviewSearch.trim()) setSelectedSubject(overviewSearch.trim()); }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="bg-brand-dark border border-brand-border rounded-xl p-5 flex items-center justify-between mb-5 shadow-xs">
+                      <div className={cn("text-5xl font-extrabold tracking-tight", currentTheme.text)}>
+                        {riskData?.score ?? 0}
+                      </div>
+                      <div className="flex flex-col items-end">
+                        <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1">Status</span>
+                        <span className={cn("border text-xs font-bold px-2.5 py-0.5 rounded uppercase tracking-wide", currentTheme.badge)}>
+                          {riskData?.category || 'NORMAL'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5 mb-5">
+                      {['alice', 'dr_singh', 'attacker_1', 'attacker_slow', 'sybil_1'].map(subj => (
+                        <button
+                          key={subj}
+                          onClick={() => setSelectedSubject(subj)}
+                          className={cn(
+                            "px-2.5 py-1 rounded-lg text-[11px] font-mono transition-all border",
+                            selectedSubject === subj
+                              ? "bg-brand-crimson text-brand-dark font-bold border-brand-crimson"
+                              : "bg-brand-dark text-brand-muted border-brand-border hover:text-brand-light"
+                          )}
+                        >
+                          {subj}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="pt-1">
+                      <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide">Score Breakdown</span>
+                      <div className="mt-2 space-y-1.5">
+                        {riskChartData.length === 0 && (
+                          <p className="text-xs font-mono text-brand-subtle">No suspicious behavioral contributions.</p>
+                        )}
+                        {riskChartData.map((c: any) => (
+                          <div key={c.rawName} className="flex items-center justify-between text-[11px] font-mono">
+                            <span className="text-brand-muted">{c.name}</span>
+                            <span className="text-brand-light font-bold">+{c.value}</span>
+                          </div>
                         ))}
                       </div>
                     </div>
+                  </section>
 
-                    {/* Chart Mini Preview */}
-                    <div className="h-44 bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={riskChartData} layout="vertical" margin={{ top: 0, right: 20, left: 10, bottom: 0 }}>
-                          <XAxis type="number" hide />
-                          <YAxis dataKey="name" type="category" width={140} tick={{ fill: '#94a3b8', fontSize: 10 }} stroke="transparent" />
-                          <Tooltip 
-                            contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '12px', color: '#fff' }} 
-                          />
-                          <Bar dataKey="value" fill={currentTheme.bar} radius={[0, 6, 6, 0]} barSize={16} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                      {riskChartData.length === 0 && (
-                        <div className="h-full flex items-center justify-center text-xs font-mono text-slate-500">
-                          Clean Subject: No suspicious behavioral contributions
-                        </div>
-                      )}
+                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Zap className="w-4 h-4 text-brand-crimson" />
+                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Live Simulator</h2>
                     </div>
-                  </div>
-
-                  {/* Right: Quick Action Hub & System Windows (5 cols) */}
-                  <div className="xl:col-span-5 space-y-6">
-                    
-                    {/* Sliding Windows Quick Widget */}
-                    <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-7 shadow-2xl">
-                      <div className="flex items-center justify-between mb-5">
-                        <h3 className="text-xs font-bold font-display text-white uppercase tracking-widest flex items-center gap-2">
-                          <Clock className="w-4 h-4 text-cyan-400" />
-                          Sliding Window Config
-                        </h3>
-                        <button onClick={() => setCurrentTab('architecture')} className="text-[11px] font-sans text-slate-400 hover:text-white">
-                          View Rules →
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 bg-slate-950/60 rounded-2xl border border-slate-800/80">
-                          <div className="text-[10px] text-slate-400 uppercase font-mono font-bold tracking-wider mb-1">Short Window</div>
-                          <div className="text-2xl font-black font-display text-white">{config?.short_window || 0}s</div>
-                          <div className="text-[10px] text-cyan-400 mt-1 font-mono font-semibold">Threshold: {config?.rapid_threshold} uniq</div>
-                        </div>
-
-                        <div className="p-4 bg-slate-950/60 rounded-2xl border border-slate-800/80">
-                          <div className="text-[10px] text-slate-400 uppercase font-mono font-bold tracking-wider mb-1">Long Window</div>
-                          <div className="text-2xl font-black font-display text-white">{config?.long_window || 0}s</div>
-                          <div className="text-[10px] text-amber-400 mt-1 font-mono font-semibold">Threshold: {config?.slow_threshold} uniq</div>
-                        </div>
-                      </div>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <button
+                        disabled={isSimulating}
+                        onClick={() => simulate('normal')}
+                        className="bg-brand-dark hover:bg-[#202020] text-brand-light font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide border border-brand-border disabled:opacity-50"
+                      >
+                        Normal
+                      </button>
+                      <button
+                        disabled={isSimulating}
+                        onClick={() => simulate('rapid')}
+                        className="bg-[#1c0e11] hover:bg-[#261217] border border-brand-crimson text-brand-crimson font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+                      >
+                        Rapid BOLA
+                      </button>
+                      <button
+                        disabled={isSimulating}
+                        onClick={() => simulate('low_and_slow')}
+                        className="bg-[#1c120a] hover:bg-[#26170d] border border-brand-orange text-brand-orange font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+                      >
+                        Low &amp; Slow
+                      </button>
+                      <button
+                        disabled={isSimulating}
+                        onClick={() => simulate('coordinated')}
+                        className="bg-[#1b0d0e] hover:bg-[#251214] border border-brand-deepred text-brand-deepred font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+                      >
+                        Coordinated
+                      </button>
                     </div>
-
-                    {/* Threat Simulator Launchers */}
-                    <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-7 shadow-2xl">
-                      <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-xs font-bold font-display text-white uppercase tracking-widest flex items-center gap-2">
-                          <Zap className="w-4 h-4 text-amber-400" />
-                          Threat Simulator Testbed
-                        </h3>
-                        <button onClick={() => setCurrentTab('simulator')} className="text-[11px] font-sans text-slate-400 hover:text-white">
-                          Full Lab →
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3">
-                        <button
-                          disabled={isSimulating}
-                          onClick={() => simulate('normal')}
-                          className="p-3 bg-slate-800/80 hover:bg-slate-700 text-white rounded-2xl text-xs font-sans font-bold transition-all active:scale-95 text-left border border-slate-700"
-                        >
-                          <div className="text-[10px] text-slate-400 uppercase font-mono">200 OK</div>
-                          <div>Normal Traffic</div>
-                        </button>
-
-                        <button
-                          disabled={isSimulating}
-                          onClick={() => simulate('rapid')}
-                          className="p-3 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 rounded-2xl text-xs font-sans font-bold transition-all active:scale-95 text-left border border-rose-500/30"
-                        >
-                          <div className="text-[10px] text-rose-400 uppercase font-mono">BOLA Burst</div>
-                          <div>Rapid Attack</div>
-                        </button>
-
-                        <button
-                          disabled={isSimulating}
-                          onClick={() => simulate('low_and_slow')}
-                          className="p-3 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 rounded-2xl text-xs font-sans font-bold transition-all active:scale-95 text-left border border-amber-500/30"
-                        >
-                          <div className="text-[10px] text-amber-400 uppercase font-mono">Stealth</div>
-                          <div>Low & Slow</div>
-                        </button>
-
-                        <button
-                          disabled={isSimulating}
-                          onClick={() => simulate('coordinated')}
-                          className="p-3 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 rounded-2xl text-xs font-sans font-bold transition-all active:scale-95 text-left border border-indigo-500/30"
-                        >
-                          <div className="text-[10px] text-indigo-400 uppercase font-mono">50+ Sybils</div>
-                          <div>Coordinated</div>
-                        </button>
-                      </div>
+                    <div className="flex justify-center pt-2">
+                      <button
+                        disabled={isSimulating}
+                        onClick={reset}
+                        className="inline-flex items-center justify-center gap-2 bg-brand-dark hover:bg-[#222222] border border-brand-border text-brand-light font-bold text-xs py-2 px-5 rounded-xl shadow-xs hover:shadow-sm transition-all disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-brand-muted" />
+                        <span>Reset Demo</span>
+                      </button>
                     </div>
-
-                  </div>
-
+                  </section>
                 </div>
 
-                {/* Recent Decision Events Feed */}
-                <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl">
-                  <div className="flex items-center justify-between mb-6">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
-                        <Database className="w-5 h-5" />
+                {/* RIGHT COLUMN: Audit Timeline (full height) */}
+                <div className="lg:col-span-4 flex flex-col h-full">
+                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm min-h-[550px] flex flex-col">
+                    <div className="flex items-center justify-between gap-2 mb-4">
+                      <div className="flex items-center gap-2">
+                        <Database className="w-4 h-4 text-brand-crimson" />
+                        <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Audit Timeline</h2>
                       </div>
-                      <div>
-                        <h2 className="text-base font-display font-bold text-white">Live Decision Stream</h2>
-                        <p className="text-xs text-slate-400 font-sans">Latest recorded access decisions</p>
-                      </div>
+                      <button
+                        onClick={() => setCurrentTab('audit')}
+                        className="text-[11px] font-bold text-brand-crimson hover:text-brand-light font-sans"
+                      >
+                        View All {events.length}
+                      </button>
                     </div>
 
-                    <button
-                      onClick={() => setCurrentTab('audit')}
-                      className="flex items-center gap-1.5 text-xs font-bold text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 px-3.5 py-2 rounded-xl border border-cyan-500/30 transition-all font-sans"
-                    >
-                      <span>View All {events.length} Logs</span>
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-3">
-                    {events.slice(0, 5).map((ev: any, i: number) => (
-                      <div 
-                        key={i} 
-                        className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between gap-4 text-xs font-mono hover:bg-slate-900/60 transition-colors"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <span className={cn(
-                            "w-2.5 h-2.5 rounded-full shrink-0",
-                            ev.outcome === 'blocked' ? 'bg-rose-500' : ev.outcome === 'denied' ? 'bg-orange-500' : 'bg-cyan-400'
-                          )}></span>
-                          <span 
-                            onClick={() => { setSelectedSubject(ev.subject_id); setCurrentTab('risk'); }}
-                            className="font-bold text-white hover:text-cyan-300 cursor-pointer truncate font-mono"
-                          >
-                            {ev.subject_id}
-                          </span>
-                          <span className="text-slate-500">→</span>
-                          <span className="text-slate-300">GET /records/{ev.record_id}</span>
-                        </div>
-
-                        <div className="flex items-center gap-3 shrink-0">
-                          <span className="text-slate-400 text-[11px]">
-                            {new Date(ev.occurred_at * 1000).toLocaleTimeString()}
-                          </span>
-                          <span className={cn(
-                            "px-2.5 py-0.5 rounded-lg text-[10px] font-bold uppercase",
-                            ev.outcome === 'blocked' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
-                            ev.outcome === 'denied' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/40' :
-                            'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                          )}>
-                            {ev.outcome}
-                          </span>
-                        </div>
+                    {events.length === 0 ? (
+                      <div className="flex-1 flex items-center justify-center py-20">
+                        <p className="text-xs font-mono text-brand-subtle tracking-wide">No events recorded.</p>
                       </div>
-                    ))}
-
-                    {events.length === 0 && (
-                      <div className="text-center py-8 text-xs font-mono text-slate-500">
-                        No events recorded yet. Run a simulator vector to generate traffic.
+                    ) : (
+                      <div className="space-y-2.5 overflow-y-auto">
+                        {events.slice(0, 12).map((ev: any, i: number) => (
+                          <div
+                            key={i}
+                            onClick={() => { setSelectedSubject(ev.subject_id); setCurrentTab('risk'); }}
+                            className="p-3 rounded-xl bg-brand-dark border border-brand-border flex items-center justify-between gap-3 text-xs font-mono hover:border-brand-crimson/40 cursor-pointer transition-colors"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className={cn(
+                                "w-2 h-2 rounded-full shrink-0",
+                                ev.outcome === 'blocked' ? 'bg-brand-crimson' : ev.outcome === 'denied' ? 'bg-brand-orange' : 'bg-brand-muted'
+                              )}></span>
+                              <span className="font-bold text-brand-light truncate">{ev.subject_id}</span>
+                            </div>
+                            <span className={cn(
+                              "px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase shrink-0",
+                              ev.outcome === 'blocked' ? 'bg-brand-crimson/20 text-brand-crimson border border-brand-crimson/40' :
+                              ev.outcome === 'denied' ? 'bg-brand-orange/20 text-brand-orange border border-brand-orange/40' :
+                              'bg-brand-border text-brand-muted border border-brand-border'
+                            )}>
+                              {ev.outcome}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     )}
-                  </div>
+                  </section>
                 </div>
 
               </div>
@@ -943,7 +808,7 @@ export default function App() {
               <div className="space-y-8 animate-in fade-in duration-300">
                 
                 {/* Subject Selector Bar */}
-                <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-7 shadow-2xl">
+                <div className="bg-brand-card border border-brand-border rounded-[32px] p-7 shadow-2xl">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-6">
                     <div>
                       <h2 className="text-lg font-black font-display text-white flex items-center gap-3">
@@ -984,7 +849,7 @@ export default function App() {
                             "p-4 rounded-2xl border cursor-pointer transition-all duration-200",
                             isSelected 
                               ? "bg-slate-800/90 border-cyan-500/50 shadow-lg shadow-cyan-500/10" 
-                              : "bg-slate-950/50 border-slate-800/80 hover:bg-slate-900/60"
+                              : "bg-slate-950/50 border-brand-border hover:bg-slate-900/60"
                           )}
                         >
                           <div className="flex items-center justify-between mb-1">
@@ -1097,14 +962,14 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="mt-8 pt-6 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono text-slate-400">
+                    <div className="mt-8 pt-6 border-t border-brand-border flex items-center justify-between text-xs font-mono text-slate-400">
                       <span>Algorithm: Sliding Time-Weighted</span>
                       <span className="text-cyan-400 font-bold">TELEMETRY LIVE</span>
                     </div>
                   </div>
 
                   {/* Signals & Breakdown (7 Cols) */}
-                  <div className="xl:col-span-7 bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl flex flex-col justify-between">
+                  <div className="xl:col-span-7 bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl flex flex-col justify-between">
                     <div>
                       <div className="flex items-center justify-between mb-6">
                         <div>
@@ -1116,7 +981,7 @@ export default function App() {
                         </span>
                       </div>
 
-                      <div className="h-64 bg-slate-950/60 p-5 rounded-2xl border border-slate-800/80 mb-6">
+                      <div className="h-64 bg-slate-950/60 p-5 rounded-2xl border border-brand-border mb-6">
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={riskChartData} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
                             <XAxis type="number" hide />
@@ -1177,7 +1042,7 @@ export default function App() {
               <div className="space-y-8 animate-in fade-in duration-300">
                 
                 {/* Simulator Suite Cards */}
-                <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl">
+                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
                     <div>
                       <h2 className="text-xl font-black font-display text-white flex items-center gap-3">
@@ -1200,7 +1065,7 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     
                     {/* Vector 1: Normal Traffic */}
-                    <div className="bg-slate-950/60 border border-slate-800/90 rounded-3xl p-6 flex flex-col justify-between hover:border-cyan-500/40 transition-all">
+                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-cyan-500/40 transition-all">
                       <div>
                         <div className="flex items-center justify-between mb-3">
                           <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-slate-900 text-cyan-400 border border-slate-700">
@@ -1224,7 +1089,7 @@ export default function App() {
                     </div>
 
                     {/* Vector 2: Rapid BOLA */}
-                    <div className="bg-slate-950/60 border border-slate-800/90 rounded-3xl p-6 flex flex-col justify-between hover:border-rose-500/40 transition-all">
+                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-rose-500/40 transition-all">
                       <div>
                         <div className="flex items-center justify-between mb-3">
                           <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">
@@ -1248,7 +1113,7 @@ export default function App() {
                     </div>
 
                     {/* Vector 3: Low & Slow */}
-                    <div className="bg-slate-950/60 border border-slate-800/90 rounded-3xl p-6 flex flex-col justify-between hover:border-amber-500/40 transition-all">
+                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-amber-500/40 transition-all">
                       <div>
                         <div className="flex items-center justify-between mb-3">
                           <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
@@ -1272,7 +1137,7 @@ export default function App() {
                     </div>
 
                     {/* Vector 4: Coordinated Sybil */}
-                    <div className="bg-slate-950/60 border border-slate-800/90 rounded-3xl p-6 flex flex-col justify-between hover:border-indigo-500/40 transition-all">
+                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-indigo-500/40 transition-all">
                       <div>
                         <div className="flex items-center justify-between mb-3">
                           <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">
@@ -1317,7 +1182,7 @@ export default function App() {
             {currentTab === 'audit' && (
               <div className="space-y-8 animate-in fade-in duration-300">
                 
-                <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl">
+                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
                   
                   {/* Search and Filters Bar */}
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-8">
@@ -1445,7 +1310,7 @@ export default function App() {
                 {/* Event Detail Modal */}
                 {selectedEventDetail && (
                   <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-[#12192C] border border-slate-700 rounded-[32px] p-8 max-w-lg w-full shadow-2xl space-y-6 animate-in zoom-in-95 duration-200">
+                    <div className="bg-brand-card border border-slate-700 rounded-[32px] p-8 max-w-lg w-full shadow-2xl space-y-6 animate-in zoom-in-95 duration-200">
                       <div className="flex items-center justify-between">
                         <h3 className="text-base font-bold font-display text-white flex items-center gap-2">
                           <Database className="w-5 h-5 text-cyan-400" />
@@ -1491,7 +1356,7 @@ export default function App() {
             {currentTab === 'architecture' && (
               <div className="space-y-8 animate-in fade-in duration-300">
                 
-                <div className="bg-[#12192C] border border-slate-800/90 rounded-[32px] p-8 shadow-2xl">
+                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
                   <div className="mb-8">
                     <h2 className="text-xl font-black font-display text-white flex items-center gap-3">
                       <Workflow className="w-6 h-6 text-cyan-400" />
@@ -1501,7 +1366,7 @@ export default function App() {
                   </div>
 
                   {/* Visual Node Flow */}
-                  <div className="bg-slate-950/70 p-8 rounded-3xl border border-slate-800/80 space-y-6 max-w-4xl mx-auto font-mono text-xs">
+                  <div className="bg-slate-950/70 p-8 rounded-3xl border border-brand-border space-y-6 max-w-4xl mx-auto font-mono text-xs">
                     
                     {/* Node 1: Request */}
                     <div className="flex flex-col items-center">
