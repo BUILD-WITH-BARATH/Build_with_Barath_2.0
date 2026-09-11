@@ -1,176 +1,92 @@
-import { useState, useEffect } from 'react';
-import { 
-  Shield,
-  ShieldAlert,
-  Wifi,
-  WifiOff,
-  Database,
-  Zap, 
-  RefreshCw, 
-  Clock, 
-  AlertTriangle, 
-  Activity, 
-  CheckCircle2, 
-  Radio, 
-  Search, 
-  ChevronRight, 
-  ShieldCheck, 
-  LayoutDashboard, 
-  Flame, 
-  AlertOctagon, 
-  Fingerprint,
-  Workflow,
-  Lock, 
-  Play, 
-  RotateCcw,
-  Terminal
-} from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-
-function CyberGlitchText({ text, className }: { text: string; className?: string }) {
-  const [displayText, setDisplayText] = useState(text);
-  const chars = '01#@$%&*<>~/!_=+?';
-
-  useEffect(() => {
-    let iteration = 0;
-    const interval = setInterval(() => {
-      setDisplayText(
-        text
-          .split('')
-          .map((_, index) => {
-            if (index < iteration) {
-              return text[index];
-            }
-            return chars[Math.floor(Math.random() * chars.length)];
-          })
-          .join('')
-      );
-
-      if (iteration >= text.length) {
-        clearInterval(interval);
-      }
-      iteration += 1 / 1.5;
-    }, 20);
-
-    return () => clearInterval(interval);
-  }, [text]);
-
-  return <span className={className}>{displayText}</span>;
-}
+import { useState, useEffect, useCallback } from 'react';
 
 const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
 
-type TabType = 'overview' | 'risk' | 'simulator' | 'audit' | 'architecture';
-
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<TabType>('overview');
   const [stats, setStats] = useState<any>(null);
+  const [config, setConfig] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [riskData, setRiskData] = useState<any>(null);
-  const [config, setConfig] = useState<any>(null);
   const [selectedSubject, setSelectedSubject] = useState('alice');
+  const [subjectInput, setSubjectInput] = useState('');
   const [isOnline, setIsOnline] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
-  const [lastSimulatedVector, setLastSimulatedVector] = useState<string | null>(null);
-  const [auditFilter, setAuditFilter] = useState<'all' | 'blocked' | 'denied' | 'allowed'>('all');
-  const [searchFilter, setSearchFilter] = useState('');
-  const [selectedEventDetail, setSelectedEventDetail] = useState<any | null>(null);
-  const [overviewSearch, setOverviewSearch] = useState('');
-
-  // Real login: the JWT lives only in memory (React state), never localStorage,
-  // and is the *logged-in user's own* token - not a hardcoded admin credential.
   const [authToken, setAuthToken] = useState<string | null>(null);
-  const [authSubject, setAuthSubject] = useState<string | null>(null);
-  const [authRole, setAuthRole] = useState<string | null>(null);
-  const [loginSubject, setLoginSubject] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [loggingIn, setLoggingIn] = useState(false);
-  const isAdmin = authRole === 'security_admin';
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoggingIn(true);
-    setLoginError(null);
-    try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: loginSubject, password: loginPassword }),
-      });
-      if (!res.ok) {
-        setLoginError('Invalid subject or password.');
-        setLoggingIn(false);
-        return;
-      }
-      const data = await res.json();
-      setAuthToken(data.access_token);
-      setAuthSubject(data.subject);
-      setAuthRole(data.role);
-      setSelectedSubject(data.subject);
-    } catch (err) {
-      setLoginError('Could not reach the backend.');
-    }
-    setLoggingIn(false);
-  };
-
-  const handleLogout = () => {
-    setAuthToken(null);
-    setAuthSubject(null);
-    setAuthRole(null);
-  };
-
-  const fetchData = async (subjectToFetch?: string) => {
-    const subj = subjectToFetch !== undefined ? subjectToFetch : (selectedSubject || 'alice');
-    try {
-      const requests: Promise<Response>[] = [
-        fetch(`${API_BASE}/stats`),
-        isAdmin && authToken
-          ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${authToken}` } })
-          : Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 })),
-        fetch(`${API_BASE}/risk/${subj || 'alice'}`),
-        fetch(`${API_BASE}/config`),
-      ];
-      const [statsRes, eventsRes, riskRes, configRes] = await Promise.all(requests);
-
-      if (statsRes.ok) setStats(await statsRes.json());
-      if (eventsRes.ok) {
-        const evData = await eventsRes.json();
-        setEvents(evData.events || []);
-      }
-      if (riskRes.ok) setRiskData(await riskRes.json());
-      if (configRes.ok) setConfig(await configRes.json());
-      setIsOnline(true);
-    } catch (err) {
-      setIsOnline(false);
-    }
-  };
 
   useEffect(() => {
-    if (!authToken) return;
+    const autoLogin = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject: 'security_admin', password: 'admin_changeme123' })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAuthToken(data.access_token);
+        } else {
+          const demoRes = await fetch(`${API_BASE}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject: 'alice', password: 'changeme123' })
+          });
+          if (demoRes.ok) {
+            const demoData = await demoRes.json();
+            setAuthToken(demoData.access_token);
+          }
+        }
+      } catch {
+        // Backend offline
+      }
+    };
+    autoLogin();
+  }, []);
+
+  const fetchData = useCallback(async (subjOverride?: string) => {
+    const subj = subjOverride !== undefined ? subjOverride : (selectedSubject || 'alice');
+    try {
+      const headers: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const [statsRes, configRes, riskRes, eventsRes] = await Promise.all([
+        fetch(`${API_BASE}/stats`),
+        fetch(`${API_BASE}/config`),
+        fetch(`${API_BASE}/risk/${encodeURIComponent(subj)}`),
+        authToken
+          ? fetch(`${API_BASE}/audit-events`, { headers })
+          : fetch(`${API_BASE}/events`, { headers }).catch(() => new Response(JSON.stringify({ events: [] })))
+      ]);
+
+      if (statsRes.ok) setStats(await statsRes.json());
+      if (configRes.ok) setConfig(await configRes.json());
+      if (riskRes.ok) setRiskData(await riskRes.json());
+      if (eventsRes && eventsRes.ok) {
+        const ev = await eventsRes.json();
+        setEvents(ev.events || []);
+      }
+      setIsOnline(true);
+    } catch {
+      setIsOnline(false);
+    }
+  }, [selectedSubject, authToken]);
+
+  useEffect(() => {
     fetchData();
-    const interval = setInterval(() => fetchData(), 2000);
-    return () => clearInterval(interval);
-  }, [selectedSubject, authToken, authRole]);
+    const timer = setInterval(() => {
+      fetchData();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [fetchData]);
 
   const simulate = async (type: string) => {
     setIsSimulating(true);
-    setLastSimulatedVector(type);
     try {
       let targetSubject = 'alice';
       if (type === 'rapid') targetSubject = 'attacker_1';
       else if (type === 'low_and_slow') targetSubject = 'attacker_slow';
-      else if (type === 'normal') targetSubject = 'alice';
       else if (type === 'coordinated') targetSubject = 'sybil_1';
-      
+
       setSelectedSubject(targetSubject);
+      setSubjectInput(targetSubject);
       await fetch(`${API_BASE}/simulate/${type}`, { method: 'POST' });
       await fetchData(targetSubject);
     } catch (err) {
@@ -183,8 +99,8 @@ export default function App() {
     setIsSimulating(true);
     try {
       await fetch(`${API_BASE}/reset`, { method: 'POST' });
-      setLastSimulatedVector(null);
       setSelectedSubject('alice');
+      setSubjectInput('');
       await fetchData('alice');
     } catch (err) {
       console.error(err);
@@ -192,1286 +108,255 @@ export default function App() {
     setIsSimulating(false);
   };
 
-  const approvePermanentBan = async (subject: string) => {
-    if (!isAdmin || !authToken) return;
-    try {
-      await fetch(`${API_BASE}/admin/approve-ban/${subject}`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } });
-      await fetchData(subject);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const rejectPermanentBan = async (subject: string) => {
-    if (!isAdmin || !authToken) return;
-    try {
-      await fetch(`${API_BASE}/admin/reject-ban/${subject}`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } });
-      await fetchData(subject);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const riskChartData = riskData?.contributions ? Object.entries(riskData.contributions).map(([name, value]) => ({ 
-    name: name.replace(/_/g, ' '), 
-    rawName: name,
-    value: Number(value)
-  })) : [];
-
-  const getScoreTheme = (score: number) => {
-    if (score >= 90) {
-      return {
-        text: 'text-rose-500',
-        badge: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
-        bar: '#f43f5e',
-        glow: 'shadow-[0_0_50px_rgba(244,63,94,0.25)]',
-        border: 'border-rose-500/40',
-        bgGradient: 'from-rose-500/15 via-rose-500/5 to-transparent',
-        accentBg: 'bg-rose-500 text-white',
-        statusName: 'Attack / Blocked'
-      };
-    }
-    if (score >= 70) {
-      return {
-        text: 'text-orange-500',
-        badge: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
-        bar: '#ea580c',
-        glow: 'shadow-[0_0_50px_rgba(234,88,12,0.25)]',
-        border: 'border-orange-500/40',
-        bgGradient: 'from-orange-500/15 via-orange-500/5 to-transparent',
-        accentBg: 'bg-orange-500 text-white',
-        statusName: 'High Risk'
-      };
-    }
-    if (score >= 40) {
-      return {
-        text: 'text-amber-500',
-        badge: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-        bar: '#d97706',
-        glow: 'shadow-[0_0_50px_rgba(217,119,6,0.25)]',
-        border: 'border-amber-500/40',
-        bgGradient: 'from-amber-500/15 via-amber-500/5 to-transparent',
-        accentBg: 'bg-amber-500 text-white',
-        statusName: 'Suspicious'
-      };
-    }
-    return {
-      text: 'text-emerald-400',
-      badge: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-      bar: '#10b981',
-      glow: 'shadow-[0_0_50px_rgba(16,185,129,0.2)]',
-      border: 'border-emerald-500/40',
-      bgGradient: 'from-emerald-500/15 via-emerald-500/5 to-transparent',
-      accentBg: 'bg-emerald-500 text-slate-950',
-      statusName: 'Normal'
-    };
-  };
-
-  const currentTheme = getScoreTheme(riskData?.score || 0);
-
-  const filteredEvents = events.filter(ev => {
-    if (auditFilter === 'blocked' && ev.outcome !== 'blocked') return false;
-    if (auditFilter === 'denied' && ev.outcome !== 'denied') return false;
-    if (auditFilter === 'allowed' && (ev.outcome === 'blocked' || ev.outcome === 'denied')) return false;
-    if (searchFilter) {
-      const q = searchFilter.toLowerCase();
-      return (
-        ev.subject_id.toLowerCase().includes(q) ||
-        String(ev.record_id).includes(q) ||
-        ev.explanation.toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
-
-  const subjectsList = [
-    { id: 'alice', label: 'alice', type: 'Normal Customer', desc: 'Legitimate object owner requests' },
-    { id: 'dr_singh', label: 'dr_singh', type: 'Assigned Doctor', desc: 'Assigned records #1-#25' },
-    { id: 'support_amy', label: 'support_amy', type: 'Delegated Support', desc: 'Active ticket-8431 grant on record #17' },
-    { id: 'attacker_1', label: 'attacker_1', type: 'Rapid Attacker', desc: 'Burst enumeration on record IDs' },
-    { id: 'attacker_slow', label: 'attacker_slow', type: 'Low & Slow Recon', desc: 'Prolonged stealth unauthorized requests' },
-    { id: 'sybil_1', label: 'sybil_1', type: 'Sybil Cluster', desc: 'Coordinated distributed object enumeration' },
-  ];
-
-  const getTabTitle = (tab: TabType) => {
-    switch (tab) {
-      case 'overview': return 'Security Operations Center';
-      case 'risk': return 'Subject Risk & Telemetry';
-      case 'simulator': return 'Interactive Threat Lab';
-      case 'audit': return 'Authoritative Audit Feed';
-      case 'architecture': return 'Defense Pipeline Architecture';
-    }
-  };
-
-  if (!authToken) {
-    return (
-      <div className="min-h-screen bg-brand-dark text-slate-100 font-sans flex items-center justify-center px-4">
-        <form onSubmit={handleLogin} className="w-full max-w-sm bg-brand-card/95 border border-brand-border rounded-3xl p-8 shadow-2xl space-y-5">
-          <div className="text-center space-y-1">
-            <ShieldCheck className="w-8 h-8 mx-auto text-cyan-400" />
-            <h1 className="font-display font-bold text-lg text-white">CyberAccess SOC Login</h1>
-            <p className="text-xs text-slate-400 font-sans">Sign in with any registered subject. Demo accounts share one password.</p>
-          </div>
-          <div className="space-y-3">
-            <input
-              type="text"
-              placeholder="subject (e.g. alice, security_admin)"
-              value={loginSubject}
-              onChange={(e) => setLoginSubject(e.target.value)}
-              className="w-full px-4 py-2.5 bg-slate-950/70 border border-slate-700 rounded-xl text-sm font-mono text-slate-100 outline-none focus:border-cyan-500"
-              autoComplete="username"
-            />
-            <input
-              type="password"
-              placeholder="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              className="w-full px-4 py-2.5 bg-slate-950/70 border border-slate-700 rounded-xl text-sm font-mono text-slate-100 outline-none focus:border-cyan-500"
-              autoComplete="current-password"
-            />
-          </div>
-          {loginError && <p className="text-xs text-rose-400 font-sans">{loginError}</p>}
-          <button
-            type="submit"
-            disabled={loggingIn || !loginSubject || !loginPassword}
-            className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm rounded-xl transition-all active:scale-95"
-          >
-            {loggingIn ? 'Signing in...' : 'Sign In'}
-          </button>
-          <p className="text-[11px] text-slate-500 font-sans text-center">
-            No account yet? Register via <code className="text-slate-400">POST /auth/register</code> against the API directly (demo prototype has no self-serve signup UI).
-          </p>
-        </form>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-brand-dark text-slate-100 font-sans selection:bg-indigo-500/25 selection:text-white flex flex-col antialiased bg-cyber-grid">
+    <>
+      {/* BEGIN: MainHeader */}
+      <header className="bg-[#111111] text-[#F5F5F5] px-6 py-3.5 flex items-center justify-between shadow-sm border-b border-[#262626] relative after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[1px] after:bg-gradient-to-r after:from-[#FF3B5C]/0 after:via-[#FF3B5C]/60 after:to-[#FF3B5C]/0">
+        {/* Brand Logo and Subtitle */}
+        <div className="flex items-center space-x-3.5">
+          {/* Shield Logo Icon */}
+          <div className="flex items-center justify-center shrink-0">
+            <img
+              src="https://lh3.googleusercontent.com/aida-public/AB6AXuCNrNyR3WSUtFfGM6VrgbwEx5W3YT4wDBMwvdIctuRJj3_Smrnc5mN0xz7jGvWLkEYjVwKtGjJbIExISJuoxJKbcEtA6yDlhTcvIGy54TJL-sZeRAxY2CqSUUTRtHELarLG7hX3y2mXHkvDzhC8Dcr_cY56anYHRnCMsJIWHUyA03HX56YKQ5iG9CDSEssFrL3-T8d1GwaccYQ9TeHVdO1flp_NhmTuwB8ZZ0dqcgZnFBbllDXkUj0a"
+              alt="Futuristic Crimson Cyber Shield Emblem"
+              className="block object-contain drop-shadow-[0_0_12px_rgba(255,59,92,0.3)]"
+              style={{ width: '56px', height: '56px', mixBlendMode: 'screen', filter: 'brightness(1.2) contrast(1.1)' }}
+            />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-wider leading-none text-[#FF3B5C] font-sans">INTEGRITY</h1>
+            <p className="text-[10px] font-mono tracking-widest text-[#A3A3A3] uppercase mt-1">DETERMINISTIC AUTH + BEHAVIORAL DEFENSE</p>
+          </div>
+        </div>
+        {/* Status Indicator Pill */}
+        <div>
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#171717] border border-[#262626] text-[#A3A3A3] text-xs font-mono tracking-wide shadow-xs">
+            {/* Radio/Signal Icon with Orange/Red indicator */}
+            <svg className="w-3.5 h-3.5 text-[#F97316]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 011.06 0z" strokeLinecap="round" strokeLinejoin="round"></path>
+            </svg>
+            <span className="text-[#F5F5F5]">{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
+        </div>
+      </header>
+      {/* END: MainHeader */}
 
-      {/* Cyber Screen Laser Scanline & Chromatic Flash Sweep */}
-      <div key={`flash-${currentTab}`} className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
-        <div className="absolute inset-0 animate-cyber-flash" />
-        <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_20px_#06b6d4] animate-scanline" />
-      </div>
-
-      {/* Ambient Mesh Lighting */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
-        <div className="absolute -top-40 left-1/4 w-[50rem] h-[50rem] bg-indigo-500/10 rounded-full blur-[160px]"></div>
-        <div className="absolute top-1/3 -right-40 w-[45rem] h-[45rem] bg-cyan-500/10 rounded-full blur-[160px]"></div>
-        <div className="absolute -bottom-40 left-10 w-[45rem] h-[45rem] bg-slate-800/20 rounded-full blur-[160px]"></div>
-      </div>
-
-      <div className="flex-1 flex relative z-10">
-        
-        {/* Modern Left Sidebar Navigation Dock */}
-        <aside className="w-20 lg:w-72 bg-brand-card/95 backdrop-blur-2xl border-r border-brand-border p-5 lg:p-6 flex flex-col justify-between hidden sm:flex shrink-0 min-h-screen overflow-y-auto">
-          <div className="space-y-6">
-            
-            {/* App Brand Header */}
-            <div className="flex items-center gap-3.5 px-2 py-1">
-              <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-cyan-500 via-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-xl shadow-cyan-500/20 shrink-0 relative overflow-hidden group">
-                <Shield className="w-6 h-6 stroke-[2.2] relative z-10" />
-                <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
+      {/* BEGIN: MainContentGrid */}
+      <main className="flex-1 max-w-[1720px] w-full mx-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        {/* BEGIN: LeftColumn (Width 4 of 12) */}
+        <div className="lg:col-span-4 flex flex-col gap-5">
+          {/* Card: Security Overview */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="security-overview-card">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" strokeLinecap="round" strokeLinejoin="round"></path>
+              </svg>
+              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">SECURITY OVERVIEW</h2>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              {/* Active Subjects Metric */}
+              <div className="bg-[#171717] border border-[#262626] rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#3a3a3a] transition-colors">
+                <span className="text-2xl font-bold text-[#F5F5F5] leading-none">{stats?.active_subjects ?? 0}</span>
+                <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mt-3">ACTIVE SUBJECTS</span>
               </div>
-              <div className="hidden lg:block">
-                <div className="flex items-center gap-2">
-                  <span className="text-lg font-black tracking-tight text-white font-display flex items-center gap-1.5">
-                    INTEGRITY
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 uppercase tracking-wide font-mono">
-                    v2.0
-                  </span>
+              {/* Blocked Subjects Metric */}
+              <div className="bg-[#201013] border border-[#DC2626]/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#FF3B5C]/60 transition-colors">
+                <span className="text-2xl font-bold text-[#FF3B5C] leading-none">{stats?.blocked_subjects ?? 0}</span>
+                <span className="text-[10px] font-bold text-[#DC2626] uppercase tracking-wide mt-3">BLOCKED SUBJECTS</span>
+              </div>
+            </div>
+            {/* Coordinated Attacks Metric */}
+            <div className="bg-[#22140c] border border-[#F97316]/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#F97316]/70 transition-colors">
+              <span className="text-2xl font-bold text-[#F97316] leading-none">{Object.keys(stats?.coordinated_attacks || {}).length}</span>
+              <span className="text-[10px] font-bold text-[#F97316] uppercase tracking-wide mt-3">COORDINATED ATTACKS DETECTED</span>
+            </div>
+          </section>
+
+          {/* Card: System Config */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="system-config-card">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3" strokeLinecap="round" strokeLinejoin="round"></path>
+              </svg>
+              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">SYSTEM CONFIG</h2>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {/* Short Window */}
+              <div>
+                <span className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">SHORT WINDOW</span>
+                <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl py-2 px-3 flex items-center gap-2">
+                  <svg className="w-3.5 h-3.5 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round"></path>
+                  </svg>
+                  <span className="text-xs font-semibold text-[#F5F5F5]">{config?.short_window ?? 0}s</span>
                 </div>
-                <p className="text-[11px] text-slate-400 font-sans flex items-center gap-1.5">
-                  <Terminal className="w-3 h-3 text-cyan-400" />
-                  BOLA Defense Engine
+                <span className="block text-[10px] text-[#737373] mt-1 font-mono">Threshold: {config?.rapid_threshold ? `${config.rapid_threshold} ` : ''}uniq</span>
+              </div>
+              {/* Long Window */}
+              <div>
+                <span className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">LONG WINDOW</span>
+                <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl py-2 px-3 flex items-center gap-2">
+                  <svg className="w-3.5 h-3.5 text-[#F97316]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round"></path>
+                  </svg>
+                  <span className="text-xs font-semibold text-[#F5F5F5]">{config?.long_window ?? 0}s</span>
+                </div>
+                <span className="block text-[10px] text-[#737373] mt-1 font-mono">Threshold: {config?.slow_threshold ? `${config.slow_threshold} ` : ''}uniq</span>
+              </div>
+            </div>
+          </section>
+        </div>
+        {/* END: LeftColumn */}
+
+        {/* BEGIN: CenterColumn (Width 4 of 12) */}
+        <div className="lg:col-span-4 flex flex-col gap-5">
+          {/* Card: Live Risk Monitor */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-risk-monitor-card">
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                  <path d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" strokeLinecap="round" strokeLinejoin="round"></path>
+                </svg>
+                <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">LIVE RISK MONITOR</h2>
+              </div>
+              {/* Subject Search Input */}
+              <div className="relative w-40">
+                <input
+                  className="w-full bg-[#0A0A0A] border border-[#262626] text-[#F5F5F5] placeholder-[#737373] text-xs rounded-lg py-1 px-2.5 focus:outline-none focus:ring-1 focus:ring-[#FF3B5C] focus:border-[#FF3B5C] transition-colors"
+                  placeholder="Type a subject ID..."
+                  type="text"
+                  value={subjectInput}
+                  onChange={(e) => setSubjectInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && subjectInput.trim()) {
+                      setSelectedSubject(subjectInput.trim());
+                    }
+                  }}
+                />
+              </div>
+            </div>
+            {/* Metric Display Panel */}
+            <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl p-5 flex items-center justify-between mb-5 shadow-xs">
+              <div className="text-5xl font-extrabold text-[#FF3B5C] tracking-tight drop-shadow-[0_0_12px_rgba(255,59,92,0.3)]">
+                {riskData?.score ?? 0}
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1">STATUS</span>
+                <span className="bg-[#171717] border border-[#262626] text-[#F5F5F5] text-xs font-bold px-2.5 py-0.5 rounded uppercase tracking-wide">
+                  {riskData?.category?.toUpperCase() || 'NORMAL'}
+                </span>
+              </div>
+            </div>
+            {/* Score Breakdown Section Header */}
+            <div className="pt-1">
+              <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide">SCORE BREAKDOWN</span>
+              {riskData?.contributions && Object.keys(riskData.contributions).length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {Object.entries(riskData.contributions).map(([key, val]) => (
+                    <div key={key} className="flex items-center justify-between text-[11px] font-mono">
+                      <span className="text-[#A3A3A3]">{key.replace(/_/g, ' ')}</span>
+                      <span className="text-[#FF3B5C] font-bold">+{Number(val)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Card: Live Simulator */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-simulator-card">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" strokeLinecap="round" strokeLinejoin="round"></path>
+              </svg>
+              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">LIVE SIMULATOR</h2>
+            </div>
+            {/* Simulator 2x2 Buttons Grid */}
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <button
+                disabled={isSimulating}
+                onClick={() => simulate('normal')}
+                className="bg-[#171717] hover:bg-[#202020] text-[#F5F5F5] font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide border border-[#262626] disabled:opacity-50"
+              >
+                NORMAL
+              </button>
+              <button
+                disabled={isSimulating}
+                onClick={() => simulate('rapid')}
+                className="bg-[#1c0e11] hover:bg-[#261217] border border-[#FF3B5C] text-[#FF3B5C] font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+              >
+                RAPID BOLA
+              </button>
+              <button
+                disabled={isSimulating}
+                onClick={() => simulate('low_and_slow')}
+                className="bg-[#1c120a] hover:bg-[#26170d] border border-[#F97316] text-[#F97316] font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+              >
+                LOW &amp; SLOW
+              </button>
+              <button
+                disabled={isSimulating}
+                onClick={() => simulate('coordinated')}
+                className="bg-[#1b0d0e] hover:bg-[#251214] border border-[#DC2626] text-[#DC2626] font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
+              >
+                COORDINATED
+              </button>
+            </div>
+            {/* Reset Demo Action */}
+            <div className="flex justify-center pt-2">
+              <button
+                disabled={isSimulating}
+                onClick={reset}
+                className="inline-flex items-center justify-center gap-2 bg-[#171717] hover:bg-[#222222] border border-[#262626] text-[#F5F5F5] font-bold text-xs py-2 px-5 rounded-xl shadow-xs hover:shadow-sm transition-all disabled:opacity-50"
+              >
+                {/* Refresh Icon */}
+                <svg className={`w-3.5 h-3.5 text-[#A3A3A3] ${isSimulating ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" strokeLinecap="round" strokeLinejoin="round"></path>
+                </svg>
+                <span>RESET DEMO</span>
+              </button>
+            </div>
+          </section>
+        </div>
+        {/* END: CenterColumn */}
+
+        {/* BEGIN: RightColumn (Width 4 of 12) */}
+        <div className="lg:col-span-4 flex flex-col h-full">
+          {/* Card: Audit Timeline (Full Height) */}
+          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm min-h-[550px] flex flex-col" data-purpose="audit-timeline-card">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" strokeLinecap="round" strokeLinejoin="round"></path>
+              </svg>
+              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">AUDIT TIMELINE</h2>
+            </div>
+            {/* Empty State Container or event items */}
+            {events.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center py-20">
+                <p className="text-xs font-mono text-[#737373] tracking-wide">
+                  No events recorded.
                 </p>
               </div>
-            </div>
-
-            {/* Logged-in identity + logout */}
-            <div className="hidden lg:flex items-center justify-between px-2 py-2 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="text-[11px] font-sans">
-                <p className="text-slate-300 font-mono font-bold">{authSubject}</p>
-                <p className="text-slate-500">{authRole}</p>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="text-[10px] font-bold text-slate-400 hover:text-rose-400 uppercase tracking-wide"
-              >
-                Logout
-              </button>
-            </div>
-
-            {/* Sidebar Navigation Tabs (Active View Switcher) */}
-            <nav className="space-y-2">
-              <div className="px-3 pb-1 text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between hidden lg:flex">
-                <span>Protocols</span>
-                <span className="text-slate-600 font-mono text-[10px]">05</span>
-              </div>
-
-              {[
-                { id: 'overview', label: 'Security Hub', desc: 'System overview & metrics', icon: LayoutDashboard, badge: null },
-                { id: 'risk', label: 'Risk Telemetry', desc: 'Subject behavioral scoring', icon: Fingerprint, badge: riskData?.score > 0 ? `${riskData.score}` : null },
-                { id: 'simulator', label: 'Threat Lab', desc: 'Traffic vector injection', icon: Zap, badge: 'Active' },
-                { id: 'audit', label: 'Audit Stream', desc: 'Forensic decision logs', icon: Database, badge: events.length > 0 ? `${events.length}` : null },
-                { id: 'architecture', label: 'Architecture', desc: '2-Tier defense pipeline', icon: Workflow, badge: null },
-              ].map(item => {
-                const Icon = item.icon;
-                const isActive = currentTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => setCurrentTab(item.id as TabType)}
-                    className={cn(
-                      "w-full relative flex items-center justify-between px-3.5 py-3 rounded-2xl font-bold text-xs transition-all duration-200 text-left group overflow-hidden active:scale-[0.97] hover-glitch",
-                      isActive 
-                        ? "bg-slate-800/90 text-white border border-cyan-500/40 shadow-lg shadow-cyan-500/10" 
-                        : "text-slate-400 hover:text-white hover:bg-slate-800/60 hover:translate-x-1 border border-transparent"
-                    )}
-                  >
-                    {/* Active Left Indicator Bar with Cyan Glow */}
-                    {isActive && (
-                      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-8 bg-gradient-to-b from-cyan-400 via-indigo-400 to-purple-400 rounded-r-full animate-cyber-indicator" />
-                    )}
-
-                    <div className="flex items-center gap-3">
-                      <div className={cn(
-                        "w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300 shrink-0",
-                        isActive 
-                          ? "bg-gradient-to-tr from-cyan-500 to-indigo-500 text-white shadow-md shadow-cyan-500/30 scale-105" 
-                          : "bg-slate-800/80 text-slate-400 group-hover:text-cyan-300 group-hover:bg-slate-700/90 group-hover:scale-105"
-                      )}>
-                        <Icon className={cn("w-4 h-4 transition-transform duration-300", isActive ? "stroke-[2.5]" : "group-hover:rotate-6")} />
-                      </div>
-                      <div className="hidden lg:block">
-                        <div className={cn("text-xs font-display font-bold leading-tight transition-colors", isActive ? "text-white" : "text-slate-300 group-hover:text-white")}>
-                          {item.label}
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans font-normal mt-0.5">{item.desc}</div>
-                      </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto space-y-2 max-h-[700px] pr-1">
+                {events.map((ev, i) => (
+                  <div key={ev.id || i} className="p-3 bg-[#0A0A0A] border border-[#262626] rounded-xl flex items-center justify-between text-xs font-mono">
+                    <div>
+                      <span className="font-bold text-[#F5F5F5]">{ev.subject_id}</span>
+                      <span className="text-[#737373] ml-2">record #{ev.record_id}</span>
                     </div>
-
-                    <div className="flex items-center gap-1.5">
-                      {item.badge && (
-                        <span className={cn(
-                          "hidden lg:inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold font-mono transition-all",
-                          isActive 
-                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm" 
-                            : "bg-slate-800 text-slate-400 group-hover:text-slate-300"
-                        )}>
-                          {item.badge}
-                        </span>
-                      )}
-                      <ChevronRight className={cn(
-                        "w-3.5 h-3.5 transition-all duration-200 hidden lg:block",
-                        isActive 
-                          ? "text-cyan-400 translate-x-0 opacity-100" 
-                          : "text-slate-600 -translate-x-1.5 opacity-0 group-hover:opacity-100 group-hover:translate-x-0 group-hover:text-cyan-300"
-                      )} />
-                    </div>
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-
-          {/* Sidebar Status Footer Widget */}
-          <div className="hidden lg:block mt-8 pt-5 border-t border-brand-border">
-            <div className="bg-gradient-to-b from-slate-900/90 to-slate-950/90 rounded-3xl p-5 border border-brand-border shadow-xl relative overflow-hidden group hover:border-slate-700 transition-colors">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-display font-bold text-white flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
-                  Engine Protected
-                </span>
-                <span className="text-[10px] font-mono font-bold text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/30">
-                  LIVE
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 font-sans leading-relaxed mb-3">
-                Deterministic SQL authorization with real-time sliding graph telemetry.
-              </p>
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-300 bg-slate-950/80 px-3 py-2 rounded-xl border border-brand-border">
-                <span>Port: 8000</span>
-                <span className="text-cyan-400 font-bold">Connected</span>
-              </div>
-            </div>
-          </div>
-        </aside>
-
-        {/* Main Workspace Layout */}
-        <div className="flex-1 flex flex-col min-w-0">
-          
-          {/* Top Navigation Header */}
-          <header className="px-6 lg:px-10 py-5 flex items-center justify-between border-b border-brand-border bg-brand-dark/85 backdrop-blur-2xl sticky top-0 z-40">
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-xl lg:text-2xl font-black text-white tracking-tight capitalize font-display">
-                  <CyberGlitchText key={currentTab} text={getTabTitle(currentTab)} />
-                </h1>
-                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-slate-900 text-cyan-400 border border-slate-700 uppercase tracking-wide flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping"></span>
-                  ONLINE
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-1 font-sans flex items-center gap-2">
-                <span className="text-slate-500 font-mono">// PROTOCOL:</span>
-                <span>Deterministic Authorization + Behavioral BOLA Defense</span>
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3.5">
-              {/* Connection Status Pill */}
-              <div className={cn(
-                "flex items-center gap-2.5 px-4 py-2 rounded-2xl text-xs font-bold border transition-all duration-300 font-mono",
-                isOnline 
-                  ? "bg-slate-900 text-slate-200 border-slate-700 shadow-sm" 
-                  : "bg-rose-500/10 text-rose-400 border-rose-500/30"
-              )}>
-                {isOnline ? (
-                  <>
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${ev.outcome === 'blocked' ? 'bg-[#201013] text-[#FF3B5C] border border-[#DC2626]/40' : ev.outcome === 'denied' ? 'bg-[#22140c] text-[#F97316] border border-[#F97316]/40' : 'bg-[#171717] text-[#A3A3A3] border border-[#262626]'}`}>
+                      {ev.outcome}
                     </span>
-                    <Wifi className="w-4 h-4 text-cyan-400" />
-                    <span className="tracking-wider text-slate-200">SECURE</span>
-                  </>
-                ) : (
-                  <>
-                    <WifiOff className="w-4 h-4 text-rose-400" />
-                    <span className="tracking-wider">OFFLINE</span>
-                  </>
-                )}
-              </div>
-
-              {/* Reset Demo Button */}
-              <button 
-                disabled={isSimulating} 
-                onClick={reset} 
-                className="flex items-center gap-2 px-4 py-2 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white font-bold text-xs rounded-2xl border border-slate-700 transition-all active:scale-95 disabled:opacity-50 shadow-sm font-sans"
-              >
-                <RefreshCw className={cn("w-3.5 h-3.5", isSimulating && "animate-spin text-cyan-400")} /> 
-                <span className="hidden sm:inline">Reset Matrix</span>
-              </button>
-            </div>
-          </header>
-
-          {/* Tab Content Container with Cyber Glitch Animation */}
-          <main key={currentTab} className="p-6 lg:p-10 flex-1 max-w-[1700px] mx-auto w-full animate-cyber-glitch">
-            
-            {/* HUD status stream badge */}
-            <div className="mb-6 flex items-center justify-between text-[11px] font-mono text-slate-400 border-b border-brand-border pb-2">
-              <div className="flex items-center gap-2 text-slate-300">
-                <span className="inline-block w-2 h-2 bg-cyan-400 rounded-sm animate-pulse"></span>
-                <span>STREAM_ID: 0x{currentTab.toUpperCase()}::SEC_NODE_01</span>
-              </div>
-              <div className="hidden sm:flex items-center gap-4 text-slate-400">
-                <span>LATENCY: 12ms</span>
-                <span>ENCRYPTION: AES-GCM-256</span>
-                <span className="text-cyan-400 font-semibold">STATUS: DECRYPTED</span>
-              </div>
-            </div>
-            
-            {/* TAB 1: SECURITY HUB (OVERVIEW) */}
-            {currentTab === 'overview' && (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start animate-in fade-in duration-300">
-
-                {/* LEFT COLUMN: Security Overview + System Config */}
-                <div className="lg:col-span-4 flex flex-col gap-5">
-                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Shield className="w-4 h-4 text-brand-crimson" />
-                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Security Overview</h2>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 mb-3">
-                      <button
-                        onClick={() => setCurrentTab('risk')}
-                        className="text-left bg-brand-dark border border-brand-border rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-crimson/50 transition-colors"
-                      >
-                        <span className="text-2xl font-bold text-brand-light leading-none">{stats?.active_subjects ?? 0}</span>
-                        <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide mt-3">Active Subjects</span>
-                      </button>
-                      <button
-                        onClick={() => setCurrentTab('audit')}
-                        className="text-left bg-[#201013] border border-brand-deepred/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-crimson/60 transition-colors"
-                      >
-                        <span className="text-2xl font-bold text-brand-crimson leading-none">{stats?.blocked_subjects ?? 0}</span>
-                        <span className="text-[10px] font-bold text-brand-deepred uppercase tracking-wide mt-3">Blocked Subjects</span>
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => setCurrentTab('simulator')}
-                      className="text-left w-full bg-[#22140c] border border-brand-orange/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-brand-orange/70 transition-colors"
-                    >
-                      <span className="text-2xl font-bold text-brand-orange leading-none">{Object.keys(stats?.coordinated_attacks || {}).length}</span>
-                      <span className="text-[10px] font-bold text-brand-orange uppercase tracking-wide mt-3">Coordinated Attacks Detected</span>
-                    </button>
-                  </section>
-
-                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Workflow className="w-4 h-4 text-brand-crimson" />
-                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">System Config</h2>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <span className="block text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1.5">Short Window</span>
-                        <div className="bg-brand-dark border border-brand-border rounded-xl py-2 px-3 flex items-center gap-2">
-                          <Clock className="w-3.5 h-3.5 text-brand-crimson" />
-                          <span className="text-xs font-semibold text-brand-light">{config?.short_window ?? 0}s</span>
-                        </div>
-                        <span className="block text-[10px] text-brand-subtle mt-1 font-mono">Threshold: {config?.rapid_threshold ?? 0} uniq</span>
-                      </div>
-                      <div>
-                        <span className="block text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1.5">Long Window</span>
-                        <div className="bg-brand-dark border border-brand-border rounded-xl py-2 px-3 flex items-center gap-2">
-                          <Clock className="w-3.5 h-3.5 text-brand-orange" />
-                          <span className="text-xs font-semibold text-brand-light">{config?.long_window ?? 0}s</span>
-                        </div>
-                        <span className="block text-[10px] text-brand-subtle mt-1 font-mono">Threshold: {config?.slow_threshold ?? 0} uniq</span>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-
-                {/* CENTER COLUMN: Live Risk Monitor + Live Simulator */}
-                <div className="lg:col-span-4 flex flex-col gap-5">
-                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
-                    <div className="flex items-center justify-between gap-2 mb-4">
-                      <div className="flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-brand-crimson" />
-                        <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Live Risk Monitor</h2>
-                      </div>
-                      <div className="relative w-40">
-                        <input
-                          className="w-full bg-brand-dark border border-brand-border text-brand-light placeholder-brand-subtle text-xs rounded-lg py-1 px-2.5 focus:outline-none focus:ring-1 focus:ring-brand-crimson focus:border-brand-crimson transition-colors"
-                          placeholder="Type a subject ID..."
-                          type="text"
-                          value={overviewSearch}
-                          onChange={(e) => setOverviewSearch(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && overviewSearch.trim()) setSelectedSubject(overviewSearch.trim()); }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="bg-brand-dark border border-brand-border rounded-xl p-5 flex items-center justify-between mb-5 shadow-xs">
-                      <div className={cn("text-5xl font-extrabold tracking-tight", currentTheme.text)}>
-                        {riskData?.score ?? 0}
-                      </div>
-                      <div className="flex flex-col items-end">
-                        <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide mb-1">Status</span>
-                        <span className={cn("border text-xs font-bold px-2.5 py-0.5 rounded uppercase tracking-wide", currentTheme.badge)}>
-                          {riskData?.category || 'NORMAL'}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-1.5 mb-5">
-                      {['alice', 'dr_singh', 'attacker_1', 'attacker_slow', 'sybil_1'].map(subj => (
-                        <button
-                          key={subj}
-                          onClick={() => setSelectedSubject(subj)}
-                          className={cn(
-                            "px-2.5 py-1 rounded-lg text-[11px] font-mono transition-all border",
-                            selectedSubject === subj
-                              ? "bg-brand-crimson text-brand-dark font-bold border-brand-crimson"
-                              : "bg-brand-dark text-brand-muted border-brand-border hover:text-brand-light"
-                          )}
-                        >
-                          {subj}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="pt-1">
-                      <span className="text-[10px] font-bold text-brand-muted uppercase tracking-wide">Score Breakdown</span>
-                      <div className="mt-2 space-y-1.5">
-                        {riskChartData.length === 0 && (
-                          <p className="text-xs font-mono text-brand-subtle">No suspicious behavioral contributions.</p>
-                        )}
-                        {riskChartData.map((c: any) => (
-                          <div key={c.rawName} className="flex items-center justify-between text-[11px] font-mono">
-                            <span className="text-brand-muted">{c.name}</span>
-                            <span className="text-brand-light font-bold">+{c.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Zap className="w-4 h-4 text-brand-crimson" />
-                      <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Live Simulator</h2>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 mb-4">
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('normal')}
-                        className="bg-brand-dark hover:bg-[#202020] text-brand-light font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide border border-brand-border disabled:opacity-50"
-                      >
-                        Normal
-                      </button>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('rapid')}
-                        className="bg-[#1c0e11] hover:bg-[#261217] border border-brand-crimson text-brand-crimson font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
-                      >
-                        Rapid BOLA
-                      </button>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('low_and_slow')}
-                        className="bg-[#1c120a] hover:bg-[#26170d] border border-brand-orange text-brand-orange font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
-                      >
-                        Low &amp; Slow
-                      </button>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('coordinated')}
-                        className="bg-[#1b0d0e] hover:bg-[#251214] border border-brand-deepred text-brand-deepred font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50"
-                      >
-                        Coordinated
-                      </button>
-                    </div>
-                    <div className="flex justify-center pt-2">
-                      <button
-                        disabled={isSimulating}
-                        onClick={reset}
-                        className="inline-flex items-center justify-center gap-2 bg-brand-dark hover:bg-[#222222] border border-brand-border text-brand-light font-bold text-xs py-2 px-5 rounded-xl shadow-xs hover:shadow-sm transition-all disabled:opacity-50"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 text-brand-muted" />
-                        <span>Reset Demo</span>
-                      </button>
-                    </div>
-                  </section>
-                </div>
-
-                {/* RIGHT COLUMN: Audit Timeline (full height) */}
-                <div className="lg:col-span-4 flex flex-col h-full">
-                  <section className="bg-brand-card rounded-2xl p-5 border border-brand-border shadow-sm min-h-[550px] flex flex-col">
-                    <div className="flex items-center justify-between gap-2 mb-4">
-                      <div className="flex items-center gap-2">
-                        <Database className="w-4 h-4 text-brand-crimson" />
-                        <h2 className="text-xs font-bold tracking-wider text-brand-light uppercase font-sans">Audit Timeline</h2>
-                      </div>
-                      <button
-                        onClick={() => setCurrentTab('audit')}
-                        className="text-[11px] font-bold text-brand-crimson hover:text-brand-light font-sans"
-                      >
-                        View All {events.length}
-                      </button>
-                    </div>
-
-                    {events.length === 0 ? (
-                      <div className="flex-1 flex items-center justify-center py-20">
-                        <p className="text-xs font-mono text-brand-subtle tracking-wide">No events recorded.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5 overflow-y-auto">
-                        {events.slice(0, 12).map((ev: any, i: number) => (
-                          <div
-                            key={i}
-                            onClick={() => { setSelectedSubject(ev.subject_id); setCurrentTab('risk'); }}
-                            className="p-3 rounded-xl bg-brand-dark border border-brand-border flex items-center justify-between gap-3 text-xs font-mono hover:border-brand-crimson/40 cursor-pointer transition-colors"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className={cn(
-                                "w-2 h-2 rounded-full shrink-0",
-                                ev.outcome === 'blocked' ? 'bg-brand-crimson' : ev.outcome === 'denied' ? 'bg-brand-orange' : 'bg-brand-muted'
-                              )}></span>
-                              <span className="font-bold text-brand-light truncate">{ev.subject_id}</span>
-                            </div>
-                            <span className={cn(
-                              "px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase shrink-0",
-                              ev.outcome === 'blocked' ? 'bg-brand-crimson/20 text-brand-crimson border border-brand-crimson/40' :
-                              ev.outcome === 'denied' ? 'bg-brand-orange/20 text-brand-orange border border-brand-orange/40' :
-                              'bg-brand-border text-brand-muted border border-brand-border'
-                            )}>
-                              {ev.outcome}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                </div>
-
+                  </div>
+                ))}
               </div>
             )}
-
-            {/* TAB 2: LIVE RISK MONITOR (DEEP TELEMETRY VIEW) */}
-            {currentTab === 'risk' && (
-              <div className="space-y-8 animate-in fade-in duration-300">
-                
-                {/* Subject Selector Bar */}
-                <div className="bg-brand-card border border-brand-border rounded-[32px] p-7 shadow-2xl">
-                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-6">
-                    <div>
-                      <h2 className="text-lg font-black font-display text-white flex items-center gap-3">
-                        <Fingerprint className="w-6 h-6 text-cyan-400" />
-                        Subject Behavioral Intelligence
-                      </h2>
-                      <p className="text-xs text-slate-400 font-sans mt-1">Select or type any subject ID to inspect real-time risk scores and signal breakdown</p>
-                    </div>
-
-                    <div className="relative w-full lg:w-80">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                        <Search className="w-4 h-4" />
-                      </div>
-                      <input 
-                        list="full-subject-list"
-                        value={selectedSubject}
-                        onChange={e => setSelectedSubject(e.target.value)}
-                        placeholder="Search or enter subject ID..."
-                        className="w-full bg-slate-950/80 border border-slate-700 rounded-2xl pl-10 pr-4 py-3 text-xs font-mono text-white outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
-                      />
-                      <datalist id="full-subject-list">
-                        {subjectsList.map(s => (
-                          <option key={s.id} value={s.id}>{s.label} ({s.type})</option>
-                        ))}
-                      </datalist>
-                    </div>
-                  </div>
-
-                  {/* Preset Subject Cards */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                    {subjectsList.map(s => {
-                      const isSelected = selectedSubject === s.id;
-                      return (
-                        <div
-                          key={s.id}
-                          onClick={() => setSelectedSubject(s.id)}
-                          className={cn(
-                            "p-4 rounded-2xl border cursor-pointer transition-all duration-200",
-                            isSelected 
-                              ? "bg-slate-800/90 border-cyan-500/50 shadow-lg shadow-cyan-500/10" 
-                              : "bg-slate-950/50 border-brand-border hover:bg-slate-900/60"
-                          )}
-                        >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-mono font-bold text-sm text-white">{s.label}</span>
-                            <span className={cn(
-                              "text-[10px] font-bold font-mono px-2 py-0.5 rounded-full uppercase",
-                              isSelected ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-400"
-                            )}>
-                              {s.type}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 font-sans leading-snug">{s.desc}</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Score Dial & Detailed Analysis */}
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-                  
-                  {/* Big Score Card (5 Cols) */}
-                  <div className={cn(
-                    "xl:col-span-5 p-8 rounded-[32px] border bg-gradient-to-b flex flex-col justify-between shadow-2xl relative overflow-hidden",
-                    currentTheme.bgGradient,
-                    currentTheme.border,
-                    currentTheme.glow
-                  )}>
-                    <div>
-                      <div className="flex items-center justify-between mb-6">
-                        <span className="text-xs font-bold uppercase tracking-widest text-slate-400 font-mono">
-                          INVESTIGATED: {selectedSubject || 'alice'}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className={cn("px-3 py-1 rounded-xl text-xs font-black font-mono uppercase border", currentTheme.badge)}>
-                            {riskData?.category || 'NORMAL'}
-                          </span>
-                          {riskData?.strikes > 0 && (
-                            <span className={cn(
-                              "px-2.5 py-1 rounded-xl text-xs font-black font-mono uppercase border",
-                              riskData.strikes >= 3 ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
-                              riskData.strikes === 2 ? "bg-orange-500/20 text-orange-300 border-orange-500/40" :
-                              "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                            )}>
-                              {riskData.is_permanent ? "STRIKE 3/3 (PERM BAN)" : `STRIKE ${riskData.strikes}/3`}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="text-center my-8">
-                        <div className={cn("text-8xl font-black font-display tracking-tight", currentTheme.text)}>
-                          {riskData?.score || 0}
-                        </div>
-                        <div className="text-xs font-mono font-bold text-slate-400 tracking-widest mt-2 uppercase">
-                          BEHAVIORAL RISK INDEX (0-100)
-                        </div>
-                      </div>
-
-                      {/* 🛡️ Human-in-the-Loop Admin Ban Approval Box (security_admin role only) */}
-                      {riskData?.is_pending_ban && isAdmin && (
-                        <div className="mb-4 p-5 bg-amber-950/80 border border-amber-600/80 rounded-2xl shadow-xl animate-in fade-in text-left">
-                          <div className="flex items-center gap-2 text-amber-300 font-bold text-xs uppercase tracking-wider mb-2 font-display">
-                            <AlertTriangle className="w-4 h-4 text-amber-400 animate-bounce" />
-                            Strike 3: Permanent Ban Awaiting Admin Approval
-                          </div>
-                          <p className="text-[11px] text-amber-200/90 mb-4 leading-relaxed font-sans">
-                            This identity has triggered 3 repeat violations and is quarantined in temporary lockout. Select SecOps action:
-                          </p>
-                          <div className="flex flex-wrap items-center gap-2.5">
-                            <button
-                              onClick={() => approvePermanentBan(selectedSubject || 'alice')}
-                              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/30 transition-all active:scale-95 flex items-center gap-1.5"
-                            >
-                              🔴 Approve Permanent Ban
-                            </button>
-                            <button
-                              onClick={() => rejectPermanentBan(selectedSubject || 'alice')}
-                              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold text-xs rounded-xl transition-all active:scale-95"
-                            >
-                              ⚪ Dismiss / Forgive (Relax Penalty)
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                      {riskData?.is_pending_ban && !isAdmin && (
-                        <div className="mb-4 p-5 bg-slate-900/80 border border-slate-700 rounded-2xl text-left">
-                          <p className="text-[11px] text-slate-400 font-sans">
-                            This identity is pending permanent-ban approval. Log in as <span className="font-mono text-slate-300">security_admin</span> to act on it.
-                          </p>
-                        </div>
-                      )}
-
-                      {riskData?.is_blocked ? (
-                        <div className="p-4 rounded-2xl bg-rose-950/80 border border-rose-800 text-rose-300 text-xs font-bold flex items-center gap-3 font-sans">
-                          <AlertOctagon className="w-5 h-5 shrink-0 text-rose-400 animate-pulse" />
-                          <span>
-                            {riskData.is_permanent 
-                              ? "PERMANENT FIREWALL BAN (APPROVED BY ADMIN)" 
-                              : riskData.is_pending_ban 
-                              ? `STRIKE 3: QUARANTINED (${riskData.lockout_remaining_s}s)` 
-                              : `ACTION BLOCKED: Lockout Active (${riskData.lockout_remaining_s}s remaining)`}
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-3 font-sans">
-                          <ShieldCheck className="w-5 h-5 shrink-0 text-cyan-400" />
-                          <span>SAFE STATUS: Behavioral risk within normal operating parameters.</span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="mt-8 pt-6 border-t border-brand-border flex items-center justify-between text-xs font-mono text-slate-400">
-                      <span>Algorithm: Sliding Time-Weighted</span>
-                      <span className="text-cyan-400 font-bold">TELEMETRY LIVE</span>
-                    </div>
-                  </div>
-
-                  {/* Signals & Breakdown (7 Cols) */}
-                  <div className="xl:col-span-7 bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between mb-6">
-                        <div>
-                          <h3 className="text-base font-display font-bold text-white">Weighted Signal Contributions</h3>
-                          <p className="text-xs text-slate-400 font-sans">Components contributing to current risk score</p>
-                        </div>
-                        <span className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1 rounded-xl border border-slate-800">
-                          {riskChartData.length} active metrics
-                        </span>
-                      </div>
-
-                      <div className="h-64 bg-slate-950/60 p-5 rounded-2xl border border-brand-border mb-6">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={riskChartData} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-                            <XAxis type="number" hide />
-                            <YAxis 
-                              dataKey="name" 
-                              type="category" 
-                              width={160} 
-                              tick={{ fill: '#cbd5e1', fontSize: 11, fontWeight: 600 }} 
-                              stroke="transparent" 
-                            />
-                            <Tooltip 
-                              contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '12px', color: '#fff' }} 
-                            />
-                            <Bar dataKey="value" fill={currentTheme.bar} radius={[0, 8, 8, 0]} barSize={22}>
-                              {riskChartData.map((_, index) => (
-                                <Cell key={`cell-${index}`} fill={currentTheme.bar} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                        {riskChartData.length === 0 && (
-                          <div className="h-full flex flex-col items-center justify-center text-xs font-mono text-slate-500">
-                            <ShieldCheck className="w-8 h-8 text-slate-600 mb-2" />
-                            <span>No risk points assessed for this subject.</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Active Detection Signals */}
-                      <div>
-                        <h4 className="text-xs font-mono font-bold text-slate-400 uppercase tracking-wider mb-3">Detected Behavioral Indicators</h4>
-                        <div className="flex flex-wrap gap-2.5">
-                          {riskData?.signals && riskData.signals.length > 0 ? (
-                            riskData.signals.map((sig: string, i: number) => (
-                              <span 
-                                key={i} 
-                                className="px-3.5 py-1.5 bg-amber-500/15 rounded-xl flex items-center gap-2 text-xs font-mono text-amber-300 border border-amber-500/30"
-                              >
-                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                                <span>{sig}</span>
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-xs font-mono text-slate-500">No abnormal behavioral signals flagged.</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-
-              </div>
-            )}
-
-            {/* TAB 3: THREAT SIMULATOR LAB */}
-            {currentTab === 'simulator' && (
-              <div className="space-y-8 animate-in fade-in duration-300">
-                
-                {/* Simulator Suite Cards */}
-                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-                    <div>
-                      <h2 className="text-xl font-black font-display text-white flex items-center gap-3">
-                        <Zap className="w-6 h-6 text-amber-400" />
-                        Synthetic Threat Injection Lab
-                      </h2>
-                      <p className="text-xs text-slate-400 font-sans mt-1">Execute synthetic testbed attack patterns to validate detector efficacy in real-time</p>
-                    </div>
-
-                    <button 
-                      disabled={isSimulating}
-                      onClick={reset}
-                      className="flex items-center gap-2 px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-2xl border border-slate-700 transition-all active:scale-95 disabled:opacity-50 font-sans"
-                    >
-                      <RotateCcw className={cn("w-4 h-4", isSimulating && "animate-spin text-cyan-400")} />
-                      <span>Re-seed Database & Reset Counters</span>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    
-                    {/* Vector 1: Normal Traffic */}
-                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-cyan-500/40 transition-all">
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-slate-900 text-cyan-400 border border-slate-700">
-                            BENIGN ACCESS
-                          </span>
-                          <CheckCircle2 className="w-5 h-5 text-cyan-400" />
-                        </div>
-                        <h3 className="text-base font-bold font-display text-white">Normal User Access (Alice, Dr. Singh)</h3>
-                        <p className="text-xs text-slate-400 font-sans mt-2 leading-relaxed">
-                          Executes authorized queries by owner and assigned physicians. Creates valid authorization edges with zero detector blocks.
-                        </p>
-                      </div>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('normal')}
-                        className="mt-6 w-full py-3 bg-slate-800 hover:bg-slate-700 text-white font-display font-bold text-xs rounded-2xl transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current text-cyan-400" />
-                        <span>Simulate Normal Traffic</span>
-                      </button>
-                    </div>
-
-                    {/* Vector 2: Rapid BOLA */}
-                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-rose-500/40 transition-all">
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">
-                            HIGH RATE BOLA
-                          </span>
-                          <Flame className="w-5 h-5 text-rose-400" />
-                        </div>
-                        <h3 className="text-base font-bold font-display text-white">Rapid BOLA Attack (Attacker 1)</h3>
-                        <p className="text-xs text-slate-400 font-sans mt-2 leading-relaxed">
-                          Attacker attempts rapid sequential record ID guessing (4+ unique unauthorized IDs within 30s). Escalates directly to automated BOLA block.
-                        </p>
-                      </div>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('rapid')}
-                        className="mt-6 w-full py-3 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 font-display font-bold text-xs rounded-2xl border border-rose-500/40 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current text-rose-400" />
-                        <span>Launch Rapid BOLA Attack</span>
-                      </button>
-                    </div>
-
-                    {/* Vector 3: Low & Slow */}
-                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-amber-500/40 transition-all">
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                            STEALTH RECON
-                          </span>
-                          <Clock className="w-5 h-5 text-amber-400" />
-                        </div>
-                        <h3 className="text-base font-bold font-display text-white">Low & Slow Reconnaissance</h3>
-                        <p className="text-xs text-slate-400 font-sans mt-2 leading-relaxed">
-                          Attacker spreads unauthorized requests across prolonged sliding windows to evade short rate limits. Caught by the long-window accumulator.
-                        </p>
-                      </div>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('low_and_slow')}
-                        className="mt-6 w-full py-3 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-display font-bold text-xs rounded-2xl border border-amber-500/40 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current text-amber-400" />
-                        <span>Simulate Low & Slow Recon</span>
-                      </button>
-                    </div>
-
-                    {/* Vector 4: Coordinated Sybil */}
-                    <div className="bg-slate-950/60 border border-brand-border rounded-3xl p-6 flex flex-col justify-between hover:border-indigo-500/40 transition-all">
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="px-3 py-1 rounded-full text-[10px] font-mono font-bold bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">
-                            DISTRIBUTED SYBIL
-                          </span>
-                          <Radio className="w-5 h-5 text-indigo-400" />
-                        </div>
-                        <h3 className="text-base font-bold font-display text-white">Coordinated Distributed Sybil Attack</h3>
-                        <p className="text-xs text-slate-400 font-sans mt-2 leading-relaxed">
-                          50+ distributed identities each query single records to avoid per-user thresholds. Flagged by the global object pressure tracker.
-                        </p>
-                      </div>
-                      <button
-                        disabled={isSimulating}
-                        onClick={() => simulate('coordinated')}
-                        className="mt-6 w-full py-3 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 font-display font-bold text-xs rounded-2xl border border-indigo-500/40 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current text-indigo-400" />
-                        <span>Simulate Coordinated Attack</span>
-                      </button>
-                    </div>
-
-                  </div>
-
-                  {lastSimulatedVector && (
-                    <div className="mt-8 p-4 rounded-2xl bg-slate-900 border border-slate-700 text-slate-200 text-xs font-mono flex items-center justify-between">
-                      <span>✓ Last executed vector: <strong className="text-cyan-400">{lastSimulatedVector}</strong></span>
-                      <button 
-                        onClick={() => setCurrentTab('audit')} 
-                        className="text-cyan-400 underline hover:text-cyan-300 font-bold font-sans"
-                      >
-                        Inspect Audit Stream →
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-            )}
-
-            {/* TAB 4: AUDIT STREAM (FORENSIC TABLE VIEW) */}
-            {currentTab === 'audit' && (
-              <div className="space-y-8 animate-in fade-in duration-300">
-                
-                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
-                  
-                  {/* Search and Filters Bar */}
-                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-8">
-                    <div>
-                      <h2 className="text-xl font-black font-display text-white flex items-center gap-3">
-                        <Database className="w-6 h-6 text-sky-400" />
-                        Authoritative Decision Audit Feed
-                      </h2>
-                      <p className="text-xs text-slate-400 font-sans mt-1">Immutable decision record with forensic explanation trace</p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-3">
-                      {/* Filter Tabs */}
-                      <div className="flex items-center bg-slate-950/80 p-1 rounded-2xl border border-slate-800 text-xs">
-                        {(['all', 'blocked', 'denied', 'allowed'] as const).map(tab => (
-                          <button
-                            key={tab}
-                            onClick={() => setAuditFilter(tab)}
-                            className={cn(
-                              "px-3.5 py-1.5 rounded-xl font-bold font-display uppercase text-[10px] tracking-wider transition-all",
-                              auditFilter === tab 
-                                ? "bg-slate-800 text-white shadow-md border border-slate-700" 
-                                : "text-slate-400 hover:text-white"
-                            )}
-                          >
-                            {tab}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Text Search Input */}
-                      <div className="relative">
-                        <input 
-                          type="text" 
-                          placeholder="Search subject, record, or reason..."
-                          value={searchFilter}
-                          onChange={e => setSearchFilter(e.target.value)}
-                          className="bg-slate-950/80 border border-slate-700 text-xs font-mono text-white rounded-2xl px-4 py-2 outline-none focus:border-cyan-500 w-64 placeholder:text-slate-500"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Audit Table */}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs font-mono border-collapse">
-                      <thead>
-                        <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider font-mono">
-                          <th className="py-3 px-4">Status</th>
-                          <th className="py-3 px-4">Subject ID</th>
-                          <th className="py-3 px-4">Endpoint</th>
-                          <th className="py-3 px-4">Authorization</th>
-                          <th className="py-3 px-4">Timestamp</th>
-                          <th className="py-3 px-4">Forensic Reason</th>
-                          <th className="py-3 px-4 text-right">Inspect</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800/60">
-                        {filteredEvents.map((ev: any, i: number) => {
-                          const isBlocked = ev.outcome === 'blocked';
-                          const isDenied = ev.outcome === 'denied';
-                          return (
-                            <tr key={i} className="hover:bg-slate-900/50 transition-colors">
-                              <td className="py-3.5 px-4">
-                                <span className={cn(
-                                  "px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider inline-block",
-                                  isBlocked ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
-                                  isDenied ? 'bg-orange-500/20 text-orange-300 border border-orange-500/40' :
-                                  'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                                )}>
-                                  {ev.outcome}
-                                </span>
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                <span 
-                                  onClick={() => { setSelectedSubject(ev.subject_id); setCurrentTab('risk'); }}
-                                  className="font-bold text-white hover:text-cyan-300 cursor-pointer underline decoration-dotted"
-                                >
-                                  {ev.subject_id}
-                                </span>
-                              </td>
-
-                              <td className="py-3.5 px-4 text-slate-300 font-semibold">
-                                GET /records/{ev.record_id}
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800 text-[10px] uppercase">
-                                  {ev.authorization || 'NONE'}
-                                </span>
-                              </td>
-
-                              <td className="py-3.5 px-4 text-slate-400">
-                                {new Date(ev.occurred_at * 1000).toLocaleTimeString()}
-                              </td>
-
-                              <td className="py-3.5 px-4 text-slate-300 max-w-md truncate">
-                                {ev.explanation}
-                              </td>
-
-                              <td className="py-3.5 px-4 text-right">
-                                <button
-                                  onClick={() => setSelectedEventDetail(ev)}
-                                  className="text-xs text-cyan-400 hover:text-cyan-300 font-bold font-sans"
-                                >
-                                  Details
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-
-                    {filteredEvents.length === 0 && (
-                      <div className="py-16 text-center text-xs font-mono text-slate-500">
-                        No audit events match your search criteria.
-                      </div>
-                    )}
-                  </div>
-
-                </div>
-
-                {/* Event Detail Modal */}
-                {selectedEventDetail && (
-                  <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-brand-card border border-slate-700 rounded-[32px] p-8 max-w-lg w-full shadow-2xl space-y-6 animate-in zoom-in-95 duration-200">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-base font-bold font-display text-white flex items-center gap-2">
-                          <Database className="w-5 h-5 text-cyan-400" />
-                          Audit Event Trace #{selectedEventDetail.id || 'N/A'}
-                        </h3>
-                        <button 
-                          onClick={() => setSelectedEventDetail(null)}
-                          className="text-slate-400 hover:text-white text-xs font-bold bg-slate-800 px-3 py-1 rounded-xl"
-                        >
-                          ✕ Close
-                        </button>
-                      </div>
-
-                      <div className="space-y-3 text-xs font-mono bg-slate-950 p-5 rounded-2xl border border-slate-800">
-                        <div><span className="text-slate-500">Subject:</span> <strong className="text-white">{selectedEventDetail.subject_id}</strong></div>
-                        <div><span className="text-slate-500">Record ID:</span> <span className="text-white">{selectedEventDetail.record_id}</span></div>
-                        <div><span className="text-slate-500">Authorization:</span> <span className="text-cyan-400">{selectedEventDetail.authorization || 'NONE'}</span></div>
-                        <div><span className="text-slate-500">Outcome:</span> <span className="text-rose-400">{selectedEventDetail.outcome}</span></div>
-                        <div><span className="text-slate-500">Timestamp:</span> <span className="text-slate-300">{new Date(selectedEventDetail.occurred_at * 1000).toLocaleString()}</span></div>
-                        <div className="pt-2 border-t border-slate-800"><span className="text-slate-500">Full Reason:</span> <p className="text-slate-300 mt-1 leading-relaxed">{selectedEventDetail.explanation}</p></div>
-                      </div>
-
-                      <div className="flex justify-end">
-                        <button 
-                          onClick={() => {
-                            setSelectedSubject(selectedEventDetail.subject_id);
-                            setSelectedEventDetail(null);
-                            setCurrentTab('risk');
-                          }}
-                          className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold font-display text-xs rounded-xl transition-all"
-                        >
-                          Investigate Subject Risk →
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-              </div>
-            )}
-
-            {/* TAB 5: ARCHITECTURE & DEFENSE PIPELINE */}
-            {currentTab === 'architecture' && (
-              <div className="space-y-8 animate-in fade-in duration-300">
-                
-                <div className="bg-brand-card border border-brand-border rounded-[32px] p-8 shadow-2xl">
-                  <div className="mb-8">
-                    <h2 className="text-xl font-black font-display text-white flex items-center gap-3">
-                      <Workflow className="w-6 h-6 text-cyan-400" />
-                      Two-Tiered BOLA Defense Architecture
-                    </h2>
-                    <p className="text-xs text-slate-400 font-sans mt-1">Authoritative zero-trust policy separation from behavioral telemetry</p>
-                  </div>
-
-                  {/* Visual Node Flow */}
-                  <div className="bg-slate-950/70 p-8 rounded-3xl border border-brand-border space-y-6 max-w-4xl mx-auto font-mono text-xs">
-                    
-                    {/* Node 1: Request */}
-                    <div className="flex flex-col items-center">
-                      <div className="px-6 py-3 bg-slate-900 border border-slate-700 rounded-2xl font-bold font-mono text-white shadow-md">
-                        HTTP API REQUEST (GET /records/:id with Authorization: Bearer JWT)
-                      </div>
-                      <div className="h-6 w-[2px] bg-slate-700 my-1"></div>
-                    </div>
-
-                    {/* Node 2: Layer 1 SQL Auth */}
-                    <div className="p-6 bg-gradient-to-br from-slate-900 to-slate-950 border border-cyan-500/40 rounded-3xl shadow-xl">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2 text-cyan-400 font-display font-bold text-sm">
-                          <Lock className="w-4 h-4" />
-                          <span>LAYER 1: DETERMINISTIC SQL AUTHORIZATION</span>
-                        </div>
-                        <span className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-2.5 py-0.5 rounded-full uppercase font-mono font-bold">
-                          Authoritative
-                        </span>
-                      </div>
-                      <p className="text-slate-400 text-xs leading-relaxed mb-4 font-sans">
-                        Only database records, physician assignments, or active time-bound grants can authorize access. A learned graph never grants permission.
-                      </p>
-
-                      <div className="grid grid-cols-2 gap-4 text-center font-bold">
-                        <div className="p-3 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 font-mono">
-                          ✓ YES: Assigned / Owner → 200 OK
-                        </div>
-                        <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400 font-mono">
-                          ✕ NO: Unauthorized → 403 Forbidden
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col items-center">
-                      <div className="h-6 w-[2px] bg-slate-700 my-1"></div>
-                    </div>
-
-                    {/* Node 3: Layer 2 Behavioral Engine */}
-                    <div className="p-6 bg-gradient-to-br from-slate-900 to-slate-950 border border-amber-500/40 rounded-3xl shadow-xl">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2 text-amber-400 font-display font-bold text-sm">
-                          <Activity className="w-4 h-4" />
-                          <span>LAYER 2: BEHAVIORAL GRAPH & ENUMERATION DETECTOR</span>
-                        </div>
-                        <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/30 px-2.5 py-0.5 rounded-full uppercase font-mono font-bold">
-                          Telemetry
-                        </span>
-                      </div>
-                      <p className="text-slate-400 text-xs leading-relaxed mb-4 font-sans">
-                        Tracks sliding window object counts, sequential ID transitions, and distributed Sybil clusters. Escalates to automated blocking if threshold breached.
-                      </p>
-
-                      <div className="p-4 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-center font-mono font-bold text-rose-300">
-                        IF RISK SCORE &gt;= 90 OR 4+ DENIALS IN 30s → TEMPORARY BOLA BLOCK
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col items-center">
-                      <div className="h-6 w-[2px] bg-slate-700 my-1"></div>
-                    </div>
-
-                    {/* Node 4: Progressive 3-Strike Escalation & HITL Governance */}
-                    <div className="p-6 bg-gradient-to-br from-slate-900 to-slate-950 border border-indigo-500/40 rounded-3xl shadow-xl">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2 text-indigo-400 font-display font-bold text-sm">
-                          <ShieldAlert className="w-4 h-4" />
-                          <span>PROGRESSIVE 3-STRIKE POLICY &amp; HUMAN-IN-THE-LOOP GOVERNANCE</span>
-                        </div>
-                        <span className="text-[10px] bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 px-2.5 py-0.5 rounded-full uppercase font-mono font-bold">
-                          Governance
-                        </span>
-                      </div>
-                      <p className="text-slate-400 text-xs leading-relaxed mb-4 font-sans">
-                        Enforces escalating penalties for repeat attacks while preventing accidental rogue lockouts via required administrator review on Strike 3.
-                      </p>
-
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-center font-mono text-xs">
-                        <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300">
-                          <div className="font-bold">Strike 1: Soft Lockout</div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">2m Cool-off (Typo safety)</div>
-                        </div>
-                        <div className="p-3 rounded-2xl bg-orange-500/15 border border-orange-500/30 text-orange-300">
-                          <div className="font-bold">Strike 2: Hard Lockout</div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">30m Isolation + SOC Alert</div>
-                        </div>
-                        <div className="p-3 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-300">
-                          <div className="font-bold">Strike 3: HITL Review</div>
-                          <div className="text-[10px] text-rose-400 mt-0.5 font-bold">Quarantine + Admin Approval</div>
-                        </div>
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-
-              </div>
-            )}
-
-          </main>
-
+          </section>
         </div>
-
-      </div>
-
-    </div>
+        {/* END: RightColumn */}
+      </main>
+      {/* END: MainContentGrid */}
+    </>
   );
 }
