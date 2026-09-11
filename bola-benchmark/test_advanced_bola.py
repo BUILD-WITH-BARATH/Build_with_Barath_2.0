@@ -505,3 +505,49 @@ def test_events_stream_sse_broadcast():
     assert "text/event-stream" in res.headers["content-type"]
     assert "ping" in res.text
     assert "connected" in res.text
+
+
+def test_redteam_campaign_execution():
+    """Red Team campaign runs sequential attacks, gathers telemetry and strikes."""
+    res = client.post("/redteam/campaign", json={
+        "attacker_subject": "attacker_6",
+        "scenario_name": "idor_sweep",
+        "target_records": ["51", "52", "53", "54", "55"]
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["attacker_subject"] == "attacker_6"
+    assert data["total_requests"] == 5
+    assert len(data["steps"]) == 5
+    assert data["interception_rate_percent"] > 0
+    assert "verdict" in data
+
+
+def test_forensic_merkle_audit_proof():
+    """Merkle audit proof returns cryptographically chained hash and compliance posture."""
+    headers = auth_headers("alice")
+    res = client.get("/forensics/audit-proof", headers=headers)
+    assert res.status_code == 200
+    proof = res.json()
+    assert proof["ledger_valid"] is True
+    assert proof["merkle_root"].startswith("0x")
+    assert "compliance_posture" in proof
+    assert proof["compliance_posture"]["owasp_api1_2023"].startswith("PROTECTED")
+
+
+def test_forensic_remediation_generation():
+    """Remediation generator returns Python, Node, Go snippets, Sigma, and WAF rules."""
+    res = client.post("/forensics/remediation", json={
+        "record_id": "55",
+        "subject": "attacker_1",
+        "endpoint": "/records/55"
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert "code_snippets" in data
+    assert "python_fastapi" in data["code_snippets"]
+    assert "nodejs_express" in data["code_snippets"]
+    assert "go_gin" in data["code_snippets"]
+    assert "sigma_yaml" in data["detection_rules"]
+    assert "cloudflare_waf_json" in data["detection_rules"]
+

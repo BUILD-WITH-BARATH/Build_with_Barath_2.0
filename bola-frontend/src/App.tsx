@@ -5,6 +5,7 @@ import { AdvancedDefenseLab } from './components/AdvancedDefenseLab';
 import { AbacExplorer } from './components/AbacExplorer';
 import { CanaryMatrix } from './components/CanaryMatrix';
 import { BenchmarkHub } from './components/BenchmarkHub';
+import { RedTeamCopilot } from './components/RedTeamCopilot';
 
 const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
@@ -21,7 +22,7 @@ export default function App() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const [activeMainTab, setActiveMainTab] = useState<'radar' | 'lab' | 'abac' | 'canary' | 'benchmarks'>('radar');
+  const [activeMainTab, setActiveMainTab] = useState<'radar' | 'redteam' | 'lab' | 'abac' | 'canary' | 'benchmarks'>('radar');
   const [activeCanaryAlert, setActiveCanaryAlert] = useState<any | null>(null);
 
   const [stats, setStats] = useState<any>(null);
@@ -430,6 +431,7 @@ export default function App() {
       <div className="bg-[#141414] border-b border-[#262626] px-6 py-2.5 flex items-center gap-2 font-mono text-xs overflow-x-auto scrollbar-none">
         {[
           { id: 'radar', label: 'THREAT RADAR & PROBE', icon: '📡' },
+          { id: 'redteam', label: 'RED TEAM & REMEDIATION COPILOT', icon: '🎯' },
           { id: 'lab', label: 'ADVANCED BOLA LAB (9 VECTORS)', icon: '⚔️' },
           { id: 'abac', label: 'DYNAMIC ABAC & REDACTION', icon: '🛡️' },
           { id: 'canary', label: 'HONEYPOT CANARY MATRIX', icon: '🪤' },
@@ -452,6 +454,14 @@ export default function App() {
 
       {/* BEGIN: MainContent */}
       <main className="flex-1 max-w-[1720px] w-full mx-auto p-5">
+        {activeMainTab === 'redteam' && (
+          <RedTeamCopilot
+            apiBase={API_BASE}
+            authToken={currentUser.token}
+            onRefreshTelemetry={() => fetchData(selectedSubject)}
+          />
+        )}
+
         {activeMainTab === 'lab' && (
           <AdvancedDefenseLab apiBase={API_BASE} authToken={currentUser.token} onRefreshTelemetry={() => fetchData(selectedSubject)} />
         )}
