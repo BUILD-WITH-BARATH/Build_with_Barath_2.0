@@ -36,6 +36,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -97,38 +99,80 @@ if APP_ENV == "prod":
         )
 
 
-def build_anomaly_model() -> IsolationForest:
-    """Unsupervised ML layer: flags behavior patterns statistically unlike normal
-    traffic, as a complement to the fixed-threshold heuristics in compute_risk().
-    Trained once at startup on synthetic feature vectors: [unique_denied_short,
+def build_anomaly_model() -> Pipeline:
+    """Finetuned Unsupervised ML layer: flags behavioral anomaly patterns statistically
+    unlike normal traffic, as a complement to the fixed-threshold heuristics in compute_risk().
+    Trained at startup on calibrated multi-modal feature vectors: [unique_denied_short,
     sequential_steps, unique_denied_long, failure_ratio, endpoints_hit].
-    """
+    Combines StandardScaler with 250 Isolation Trees across casual users, power clinicians,
+    accidental typos, rapid fuzzers, low-and-slow stealth probes, and multi-endpoint sprays."""
     rng = np.random.RandomState(42)
 
     normal = []
-    for _ in range(300):
+    # 1. Standard benign users (500)
+    for _ in range(500):
         normal.append([
-            rng.choice([0, 0, 0, 1]),
+            rng.choice([0, 0, 0, 0, 1]),
             0,
-            rng.choice([0, 0, 0, 0, 1, 2]),
-            rng.uniform(0.0, 0.3),
-            rng.choice([0, 0, 1]),
+            rng.choice([0, 0, 0, 1, 2]),
+            rng.uniform(0.0, 0.20),
+            rng.choice([0, 1, 1, 2]),
+        ])
+    # 2. Legitimate power users & clinicians (250)
+    for _ in range(250):
+        normal.append([
+            rng.choice([0, 0, 0, 0, 1]),
+            0,
+            rng.choice([0, 0, 0, 1]),
+            rng.uniform(0.0, 0.10),
+            rng.choice([1, 2, 2, 3, 4]),
+        ])
+    # 3. Accidental human typos / network disconnects (100)
+    for _ in range(100):
+        normal.append([
+            rng.choice([1, 1, 2]),
+            0,
+            rng.choice([1, 2, 3]),
+            rng.uniform(0.10, 0.35),
+            rng.choice([1, 1, 2]),
         ])
 
     attack = []
+    # 4. Rapid IDOR / BOLA fuzzer (60)
     for _ in range(60):
         attack.append([
-            rng.randint(4, 12),
-            rng.randint(2, 6),
-            rng.randint(15, 40),
-            rng.uniform(0.6, 1.0),
-            rng.randint(2, 4),
+            rng.randint(4, 15),
+            rng.randint(2, 8),
+            rng.randint(15, 45),
+            rng.uniform(0.65, 1.0),
+            rng.randint(1, 4),
+        ])
+    # 5. Low & slow stealth reconnaissance (50)
+    for _ in range(50):
+        attack.append([
+            rng.randint(0, 4),
+            rng.randint(1, 4),
+            rng.randint(12, 30),
+            rng.uniform(0.60, 0.95),
+            rng.randint(1, 3),
+        ])
+    # 6. Multi-endpoint vulnerability spray (40)
+    for _ in range(40):
+        attack.append([
+            rng.randint(2, 7),
+            rng.randint(0, 3),
+            rng.randint(8, 25),
+            rng.uniform(0.70, 1.0),
+            rng.randint(3, 6),
         ])
 
     training_data = np.array(normal + attack)
-    model = IsolationForest(n_estimators=100, contamination=0.15, random_state=42)
-    model.fit(training_data)
-    return model
+    pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('forest', IsolationForest(n_estimators=250, max_samples=256, contamination=0.15, random_state=42))
+    ])
+    pipe.fit(training_data)
+    return pipe
 
 
 anomaly_model = build_anomaly_model()
@@ -656,6 +700,8 @@ def score_record_graph_anomaly(tenant_id: str, record_id: int | str) -> dict | N
     if endpoint_anomaly_model is None:
         return None
     features = compute_record_graph_features(tenant_id, record_id)
+    if features["num_sessions"] == 0:
+        return {"is_anomalous": False, "anomaly_probability": 0.0}
     frame = pd.DataFrame([features])
     prediction = endpoint_anomaly_model.predict(frame)[0]
     probability = endpoint_anomaly_model.predict_proba(frame)[0][1]
