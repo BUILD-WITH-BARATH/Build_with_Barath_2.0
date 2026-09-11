@@ -47,11 +47,10 @@ DEMO_TENANT_ID = "demo"
 TENANT_SIGNUP_KEY = os.environ.get("TENANT_SIGNUP_KEY", "dev-insecure-signup-key-change-in-production")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
+if not DATABASE_URL and APP_ENV == "prod":
     raise RuntimeError(
-        "DATABASE_URL is required (Postgres connection string) - this app no longer runs on "
-        "SQLite. For local dev, point it at a free hosted Postgres (e.g. Neon, Supabase) or a "
-        "local Postgres instance."
+        "DATABASE_URL is required (Postgres connection string) in production - this app runs on "
+        "Postgres in prod. For local dev/testing, SQLite fallback is enabled automatically."
     )
 
 if APP_ENV == "prod":
@@ -116,19 +115,104 @@ _ENDPOINT_MODEL_PATH = Path(__file__).with_name("models") / "endpoint_anomaly_mo
 endpoint_anomaly_model = joblib.load(_ENDPOINT_MODEL_PATH) if _ENDPOINT_MODEL_PATH.exists() else None
 
 
-_pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, kwargs={"row_factory": dict_row}, open=True)
-atexit.register(_pool.close)
+if DATABASE_URL and not DATABASE_URL.startswith("sqlite"):
+    _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, kwargs={"row_factory": dict_row}, open=True)
+    atexit.register(_pool.close)
 
+    @contextmanager
+    def db():
+        with _pool.connection() as connection:
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+else:
+    import sqlite3
+    import re
+    from threading import Lock
 
-@contextmanager
-def db():
-    with _pool.connection() as connection:
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+    _db_lock = Lock()
+    _sqlite_file = Path(__file__).parent / "dev.db" if not (DATABASE_URL and ":memory:" in DATABASE_URL) else ":memory:"
+    _raw_sqlite = sqlite3.connect(str(_sqlite_file), check_same_thread=False)
+    _raw_sqlite.row_factory = sqlite3.Row
+
+    class SQLiteCursorWrapper:
+        def __init__(self, cur):
+            self.cur = cur
+
+        def _transform_sql(self, sql: str) -> str:
+            s = sql.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+            s = s.replace("DOUBLE PRECISION", "REAL")
+            s = s.replace("BOOLEAN", "INTEGER")
+            s = re.sub(r'\ballowed\s*=\s*false\b', 'allowed = 0', s, flags=re.IGNORECASE)
+            s = re.sub(r'\ballowed\s*=\s*true\b', 'allowed = 1', s, flags=re.IGNORECASE)
+            s = re.sub(r'\bctid\b', 'rowid', s)
+            s = re.sub(r'%s', '?', s)
+            return s
+
+        def execute(self, sql, params=None):
+            s = self._transform_sql(sql)
+            if params is not None:
+                p = [int(x) if isinstance(x, bool) else x for x in params]
+                self.cur.execute(s, p)
+            else:
+                stmts = [stmt.strip() for stmt in s.split(";") if stmt.strip()]
+                if len(stmts) > 1:
+                    self.cur.executescript(s)
+                else:
+                    self.cur.execute(s)
+            return self
+
+        def executemany(self, sql, seq_of_params):
+            s = self._transform_sql(sql)
+            p_seq = [[int(x) if isinstance(x, bool) else x for x in params] for params in seq_of_params]
+            self.cur.executemany(s, p_seq)
+            return self
+
+        def fetchone(self):
+            r = self.cur.fetchone()
+            return dict(r) if r is not None else None
+
+        def fetchall(self):
+            return [dict(r) for r in self.cur.fetchall()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class SQLiteConnWrapper:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def cursor(self):
+            return SQLiteCursorWrapper(self.conn.cursor())
+
+        def execute(self, sql, params=None):
+            cur = self.cursor()
+            cur.execute(sql, params)
+            return cur
+
+        def commit(self):
+            self.conn.commit()
+
+        def rollback(self):
+            self.conn.rollback()
+
+    _sqlite_wrapper = SQLiteConnWrapper(_raw_sqlite)
+
+    @contextmanager
+    def db():
+        with _db_lock:
+            try:
+                yield _sqlite_wrapper
+                _sqlite_wrapper.commit()
+            except Exception:
+                _sqlite_wrapper.rollback()
+                raise
 
 
 def hash_api_key(key: str) -> str:
@@ -570,8 +654,8 @@ class BehavioralRiskEngine:
         denied_all = [e for e in q if not e.allowed]
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
 
-        unique_denied_short = len({e.record_id for e in denied_short if e.endpoint == "records"})
-        unique_denied_long = len({e.record_id for e in denied_all if e.endpoint == "records"})
+        unique_denied_short = len({e.record_id for e in denied_short if e.endpoint in ("records", "v1")})
+        unique_denied_long = len({e.record_id for e in denied_all if e.endpoint in ("records", "v1")})
 
         total_long = len(q)
         failed_long = len(denied_all)
@@ -588,7 +672,7 @@ class BehavioralRiskEngine:
         # Sequential short - best-effort: only numeric record_ids can show a "step"
         # pattern; arbitrary string resource_ids (e.g. from external /v1/authorize
         # tenants) simply never trip this signal, a documented limitation.
-        short_ids_raw = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint == "records"]
+        short_ids_raw = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint in ("records", "v1")]
         short_ids = []
         for rid in short_ids_raw:
             try:
