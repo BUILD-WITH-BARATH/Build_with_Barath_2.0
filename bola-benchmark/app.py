@@ -10,7 +10,9 @@ from pathlib import Path
 
 import bcrypt
 import jwt
+import joblib
 import numpy as np
+import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
@@ -88,6 +90,59 @@ def build_anomaly_model() -> IsolationForest:
 
 
 anomaly_model = build_anomaly_model()
+
+# Second, separate anomaly model: trained offline on REAL labeled data (Kaggle's
+# API access-behaviour dataset) via train_endpoint_anomaly_model.py, not synthetic
+# data like anomaly_model above. Scores per-RECORD access-graph shape, not
+# per-subject behavior. Optional: the app runs fine without it (endpoint_anomaly_model
+# stays None) if the artifact hasn't been trained/committed yet.
+_ENDPOINT_MODEL_PATH = Path(__file__).with_name("models") / "endpoint_anomaly_model.joblib"
+endpoint_anomaly_model = joblib.load(_ENDPOINT_MODEL_PATH) if _ENDPOINT_MODEL_PATH.exists() else None
+
+
+def compute_record_graph_features(record_id: int) -> dict:
+    """Best-effort proxy of the Kaggle dataset's per-endpoint features, computed
+    from this app's own risk_events. Not the same distribution the model was
+    trained on (documented in train_endpoint_anomaly_model.py and the README) -
+    treat the resulting score as a rough signal, not a calibrated probability."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT subject, at, endpoint FROM risk_events WHERE record_id = ? ORDER BY at ASC",
+            (record_id,)).fetchall()
+    if not rows:
+        return {
+            "inter_api_access_duration(sec)": 0.0, "api_access_uniqueness": 0.0,
+            "sequence_length(count)": 0, "vsession_duration(min)": 0.0,
+            "ip_type": "default", "num_sessions": 0, "num_users": 0,
+            "num_unique_apis": 0, "source": "E",
+        }
+    subjects = [r["subject"] for r in rows]
+    times = [r["at"] for r in rows]
+    endpoints = {r["endpoint"] for r in rows}
+    deltas = [b - a for a, b in zip(times, times[1:])]
+    return {
+        "inter_api_access_duration(sec)": (sum(deltas) / len(deltas)) if deltas else 0.0,
+        "api_access_uniqueness": len(set(subjects)) / len(subjects),
+        "sequence_length(count)": len(rows),
+        "vsession_duration(min)": (times[-1] - times[0]) / 60.0,
+        "ip_type": "default",
+        "num_sessions": len(rows),
+        "num_users": len(set(subjects)),
+        "num_unique_apis": len(endpoints),
+        "source": "E",
+    }
+
+
+def score_record_graph_anomaly(record_id: int) -> dict | None:
+    """Returns the endpoint-level model's prediction for a record, or None if
+    the model hasn't been trained/committed (see train_endpoint_anomaly_model.py)."""
+    if endpoint_anomaly_model is None:
+        return None
+    features = compute_record_graph_features(record_id)
+    frame = pd.DataFrame([features])
+    prediction = endpoint_anomaly_model.predict(frame)[0]
+    probability = endpoint_anomaly_model.predict_proba(frame)[0][1]
+    return {"is_anomalous": bool(prediction), "anomaly_probability": round(float(probability), 4)}
 
 
 @contextmanager
@@ -842,6 +897,17 @@ def get_risk(subject: str) -> dict:
         "is_permanent": is_approved,
         "lockout_remaining_s": remaining
     }
+
+
+@app.get("/records/{record_id}/graph-risk")
+def get_record_graph_risk(record_id: int, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
+    """Endpoint-level access-graph anomaly score from the real-data-trained
+    model (see train_endpoint_anomaly_model.py). Separate from the per-subject
+    behavioral score at /risk/{subject}; requires login but not admin."""
+    result = score_record_graph_anomaly(record_id)
+    if result is None:
+        raise HTTPException(503, "Endpoint anomaly model not trained yet - run train_endpoint_anomaly_model.py")
+    return {"record_id": record_id, **result, "features": compute_record_graph_features(record_id)}
 
 
 @app.post("/admin/approve-ban/{subject}")

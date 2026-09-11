@@ -8,3 +8,4 @@ __pycache__/
 *.db
 bola.db
 bola-benchmark/results/
+bola-benchmark/data/
