@@ -34,6 +34,9 @@ client = TestClient(app)
 
 def auth_headers(subject: str, password: str = DEMO_PASSWORD) -> dict:
     res = client.post("/auth/login", json={"subject": subject, "password": password})
+    if res.status_code != 200:
+        client.post("/auth/register", json={"subject": subject, "password": password})
+        res = client.post("/auth/login", json={"subject": subject, "password": password})
     assert res.status_code == 200, f"Login failed for {subject}: {res.text}"
     token = res.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}

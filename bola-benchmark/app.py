@@ -560,7 +560,9 @@ def authorization_context(tenant_id: str, subject: str, record_id: int | str, ac
             return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
 
         # Admin override (security_admin role has read/audit oversight)
-        if subject == ADMIN_ROLE:
+        user_row = c.execute("SELECT role FROM users WHERE tenant_id = %s AND id = %s", (tenant_id, subject)).fetchone()
+        user_role = user_row["role"] if user_row else None
+        if user_role == ADMIN_ROLE or subject == ADMIN_ROLE:
             return {"authorization": "admin", "explanations": ["Access allowed: security_admin administrative authority."], "delegation": None}
 
         # Owner check (owner has all permissions: read, write, delete)
