@@ -4,6 +4,7 @@ import { CanaryAlertBanner } from './components/CanaryAlertBanner';
 import { AdvancedDefenseLab } from './components/AdvancedDefenseLab';
 import { AbacExplorer } from './components/AbacExplorer';
 import { CanaryMatrix } from './components/CanaryMatrix';
+import { BenchmarkHub } from './components/BenchmarkHub';
 
 const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
@@ -20,7 +21,7 @@ export default function App() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const [activeMainTab, setActiveMainTab] = useState<'radar' | 'lab' | 'abac' | 'canary'>('radar');
+  const [activeMainTab, setActiveMainTab] = useState<'radar' | 'lab' | 'abac' | 'canary' | 'benchmarks'>('radar');
   const [activeCanaryAlert, setActiveCanaryAlert] = useState<any | null>(null);
 
   const [stats, setStats] = useState<any>(null);
@@ -375,6 +376,7 @@ export default function App() {
           { id: 'lab', label: 'ADVANCED BOLA LAB (9 VECTORS)', icon: '⚔️' },
           { id: 'abac', label: 'DYNAMIC ABAC & REDACTION', icon: '🛡️' },
           { id: 'canary', label: 'HONEYPOT CANARY MATRIX', icon: '🪤' },
+          { id: 'benchmarks', label: 'BENCHMARKS & EVALUATION', icon: '📈' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -403,6 +405,10 @@ export default function App() {
 
         {activeMainTab === 'canary' && (
           <CanaryMatrix apiBase={API_BASE} authToken={currentUser.token} currentUserRole={currentUser.role} />
+        )}
+
+        {activeMainTab === 'benchmarks' && (
+          <BenchmarkHub apiBase={API_BASE} />
         )}
 
         {activeMainTab === 'radar' && (

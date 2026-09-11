@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from cyberaccess_sdk import CyberAccessClient, CyberAccessBlocked
+from cyberaccess_sdk import CyberAccessClient, AsyncCyberAccessClient, CyberAccessBlocked
 
 BASE = "https://api.example.test"
 
@@ -126,3 +126,43 @@ def test_authorize_batch_evaluates_items():
     assert batch_res["total"] == 2
     assert len(batch_res["results"]) == 2
     assert batch_res["results"][0]["decision"] == "allow"
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_async_authorize_allow():
+    respx.post(f"{BASE}/v1/authorize").mock(
+        return_value=httpx.Response(200, json={"decision": "allow", "score": 0, "category": "Normal", "signals": []})
+    )
+    async with AsyncCyberAccessClient(api_key="sk_test", base_url=BASE) as client:
+        result = await client.authorize("alice", "record-1", authorized=True)
+        assert result.allowed
+        assert not result.blocked
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_async_authorize_mutation():
+    respx.post(f"{BASE}/v1/authorize").mock(
+        return_value=httpx.Response(200, json={"decision": "block", "score": 80, "category": "Attack", "signals": ["unauthorized_write_delete_attempt"]})
+    )
+    async with AsyncCyberAccessClient(api_key="sk_test", base_url=BASE) as client:
+        result = await client.authorize_mutation("attacker", "record-1", authorized=False, http_verb="DELETE")
+        assert result.blocked
+        assert result.score == 80
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_async_authorize_batch():
+    respx.post(f"{BASE}/v1/authorize-batch").mock(
+        return_value=httpx.Response(200, json={
+            "total": 1, "blocked_mid_batch": False,
+            "results": [{"resource_id": "10", "decision": "allow", "score": 0, "signals": []}]
+        })
+    )
+    async with AsyncCyberAccessClient(api_key="sk_test", base_url=BASE) as client:
+        batch_res = await client.authorize_batch("alice", [{"resource_id": "10", "authorized": True}])
+        assert batch_res["total"] == 1
+        assert batch_res["results"][0]["resource_id"] == "10"
+

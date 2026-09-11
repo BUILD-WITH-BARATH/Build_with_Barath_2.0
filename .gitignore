@@ -6,6 +6,8 @@ __pycache__/
 *.pyc
 .venv/
 *.db
+*.db-shm
+*.db-wal
 bola.db
 bola-benchmark/results/
 bola-benchmark/data/

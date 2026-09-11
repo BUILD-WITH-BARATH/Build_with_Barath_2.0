@@ -147,3 +147,112 @@ class CyberAccessClient:
 
     def __exit__(self, *exc_info) -> None:
         self.close()
+
+
+class AsyncCyberAccessClient:
+    """Asynchronous client for the CyberAccess /v1/authorize product API.
+
+    Designed for modern async frameworks (FastAPI, Starlette, AIOHTTP, Quart).
+    Uses `httpx.AsyncClient` under the hood. Supports `async with` and fail-open/fail-closed policies.
+    """
+
+    def __init__(self, api_key: str, base_url: str = "https://api.cyberaccess.dev",
+                 timeout: float = 5.0, fail_open: bool = True):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.fail_open = fail_open
+        self._client = httpx.AsyncClient(timeout=timeout)
+
+    def _fallback(self, authorized: bool) -> AuthorizeResult:
+        if self.fail_open:
+            return AuthorizeResult(
+                decision="allow" if authorized else "deny",
+                score=0,
+                category="Normal",
+                signals=[],
+                explanations=["Risk engine unreachable; fail-open fallback applied."],
+            )
+        return AuthorizeResult(
+            decision="deny",
+            score=0,
+            category="Normal",
+            signals=[],
+            explanations=["Risk engine unreachable; fail-closed fallback applied."],
+        )
+
+    async def authorize(self, subject: str, resource_id: str, authorized: bool) -> AuthorizeResult:
+        """Asynchronously evaluates access for a subject/resource pair."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/v1/authorize",
+                json={"subject": subject, "resource_id": str(resource_id), "authorized": authorized},
+                headers={"X-API-Key": self.api_key},
+            )
+            response.raise_for_status()
+            body = response.json()
+            return AuthorizeResult(
+                decision=body["decision"], score=body["score"], category=body["category"],
+                signals=body.get("signals", []), explanations=body.get("explanations", []),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise ValueError("Invalid CyberAccess API key") from exc
+            return self._fallback(authorized)
+        except httpx.RequestError:
+            return self._fallback(authorized)
+
+    async def authorize_mutation(self, subject: str, resource_id: str, authorized: bool, http_verb: str = "POST") -> AuthorizeResult:
+        """Asynchronously reports write/mutation actions (POST, PUT, PATCH, DELETE) with verb weighting."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/v1/authorize",
+                json={"subject": subject, "resource_id": str(resource_id), "authorized": authorized, "http_verb": http_verb},
+                headers={"X-API-Key": self.api_key},
+            )
+            response.raise_for_status()
+            body = response.json()
+            return AuthorizeResult(
+                decision=body["decision"], score=body["score"], category=body["category"],
+                signals=body.get("signals", []), explanations=body.get("explanations", []),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise ValueError("Invalid CyberAccess API key") from exc
+            return self._fallback(authorized)
+        except httpx.RequestError:
+            return self._fallback(authorized)
+
+    async def authorize_batch(self, subject: str, items: list[dict]) -> dict:
+        """Asynchronously evaluates an array of resource requests with atomic batch limits."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/v1/authorize-batch",
+                json={"subject": subject, "items": items},
+                headers={"X-API-Key": self.api_key},
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise ValueError("Invalid CyberAccess API key") from exc
+            if self.fail_open:
+                return {"total": len(items), "blocked_mid_batch": False,
+                        "results": [{"resource_id": str(i.get("resource_id")), "decision": "allow" if i.get("authorized") else "deny", "score": 0, "signals": []} for i in items]}
+            return {"total": len(items), "blocked_mid_batch": False,
+                    "results": [{"resource_id": str(i.get("resource_id")), "decision": "deny", "score": 0, "signals": []} for i in items]}
+        except httpx.RequestError:
+            if self.fail_open:
+                return {"total": len(items), "blocked_mid_batch": False,
+                        "results": [{"resource_id": str(i.get("resource_id")), "decision": "allow" if i.get("authorized") else "deny", "score": 0, "signals": []} for i in items]}
+            return {"total": len(items), "blocked_mid_batch": False,
+                    "results": [{"resource_id": str(i.get("resource_id")), "decision": "deny", "score": 0, "signals": []} for i in items]}
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "AsyncCyberAccessClient":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.aclose()
+

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from .client import AuthorizeResult, CyberAccessClient
+from .client import AuthorizeResult, CyberAccessClient, AsyncCyberAccessClient
 
 
 def enforce(client: CyberAccessClient, subject: str, resource_id: str, authorized: bool) -> AuthorizeResult:
@@ -26,6 +26,22 @@ def enforce(client: CyberAccessClient, subject: str, resource_id: str, authorize
             return fetch_record(record_id)
     """
     result = client.authorize(subject, resource_id, authorized)
+    if result.decision == "block":
+        raise HTTPException(403, detail={
+            "outcome": "blocked",
+            "reason": "Behavioral risk engine detected a suspicious access pattern",
+            "score": result.score,
+            "category": result.category,
+            "signals": result.signals,
+        })
+    if result.decision == "deny":
+        raise HTTPException(403, detail={"outcome": "denied", "score": result.score, "category": result.category})
+    return result
+
+
+async def async_enforce(client: AsyncCyberAccessClient, subject: str, resource_id: str, authorized: bool) -> AuthorizeResult:
+    """Asynchronous equivalent of `enforce()`, designed for async FastAPI route handlers."""
+    result = await client.authorize(subject, resource_id, authorized)
     if result.decision == "block":
         raise HTTPException(403, detail={
             "outcome": "blocked",
