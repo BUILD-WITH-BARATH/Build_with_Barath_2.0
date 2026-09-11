@@ -1,8 +1,19 @@
-"""Minimal FastAPI API with authoritative object authorization and graph telemetry."""
+"""Multi-tenant FastAPI API with authoritative object authorization and graph telemetry.
+
+Backed by Postgres (not SQLite) so it can run as a real, horizontally-scaled
+service shared by multiple customers ("tenants"), each isolated by tenant_id.
+Two front doors:
+  - The JWT-authenticated demo/dashboard API (unchanged in spirit from before),
+    scoped to a single seeded "demo" tenant.
+  - The API-key-authenticated product API (/v1/*) other companies' backends
+    call on every request instead of hosting their whole API through us.
+"""
 from __future__ import annotations
 
+import atexit
+import hashlib
 import os
-import sqlite3
+import secrets
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,17 +24,15 @@ import jwt
 import joblib
 import numpy as np
 import pandas as pd
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-
-_DB_DIR = Path(os.environ["DB_DIR"]) if os.environ.get("DB_DIR") else Path(__file__).parent
-_DB_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = _DB_DIR / "demo.db"
-AUDIT_DB_PATH = _DB_DIR / "audit.db"
 
 # --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
 APP_ENV = os.environ.get("APP_ENV", "dev")
@@ -34,6 +43,16 @@ JWT_EXPIRY_SECONDS = int(os.environ.get("JWT_EXPIRY_SECONDS", "3600"))
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "changeme123")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin_changeme123")
 ADMIN_ROLE = "security_admin"
+DEMO_TENANT_ID = "demo"
+TENANT_SIGNUP_KEY = os.environ.get("TENANT_SIGNUP_KEY", "dev-insecure-signup-key-change-in-production")
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is required (Postgres connection string) - this app no longer runs on "
+        "SQLite. For local dev, point it at a free hosted Postgres (e.g. Neon, Supabase) or a "
+        "local Postgres instance."
+    )
 
 if APP_ENV == "prod":
     _insecure_defaults = []
@@ -43,6 +62,8 @@ if APP_ENV == "prod":
         _insecure_defaults.append("DEMO_PASSWORD")
     if ADMIN_PASSWORD == "admin_changeme123":
         _insecure_defaults.append("ADMIN_PASSWORD")
+    if TENANT_SIGNUP_KEY.startswith("dev-"):
+        _insecure_defaults.append("TENANT_SIGNUP_KEY")
     if _insecure_defaults:
         raise RuntimeError(
             f"APP_ENV=prod but dev-only defaults still set for: {', '.join(_insecure_defaults)}. "
@@ -66,21 +87,21 @@ def build_anomaly_model() -> IsolationForest:
     normal = []
     for _ in range(300):
         normal.append([
-            rng.choice([0, 0, 0, 1]),          # occasional single denied ID, never habitual
-            0,                                  # no sequential stepping
-            rng.choice([0, 0, 0, 0, 1, 2]),     # a stray denial or two over the long window
-            rng.uniform(0.0, 0.3),               # low failure ratio
-            rng.choice([0, 0, 1]),               # rarely touches a second endpoint
+            rng.choice([0, 0, 0, 1]),
+            0,
+            rng.choice([0, 0, 0, 0, 1, 2]),
+            rng.uniform(0.0, 0.3),
+            rng.choice([0, 0, 1]),
         ])
 
     attack = []
     for _ in range(60):
         attack.append([
-            rng.randint(4, 12),                 # rapid unique-object pressure
-            rng.randint(2, 6),                   # sequential enumeration
-            rng.randint(15, 40),                 # low-and-slow reconnaissance
-            rng.uniform(0.6, 1.0),               # high failure ratio
-            rng.randint(2, 4),                   # multi-endpoint diversity
+            rng.randint(4, 12),
+            rng.randint(2, 6),
+            rng.randint(15, 40),
+            rng.uniform(0.6, 1.0),
+            rng.randint(2, 4),
         ])
 
     training_data = np.array(normal + attack)
@@ -91,24 +112,226 @@ def build_anomaly_model() -> IsolationForest:
 
 anomaly_model = build_anomaly_model()
 
-# Second, separate anomaly model: trained offline on REAL labeled data (Kaggle's
-# API access-behaviour dataset) via train_endpoint_anomaly_model.py, not synthetic
-# data like anomaly_model above. Scores per-RECORD access-graph shape, not
-# per-subject behavior. Optional: the app runs fine without it (endpoint_anomaly_model
-# stays None) if the artifact hasn't been trained/committed yet.
 _ENDPOINT_MODEL_PATH = Path(__file__).with_name("models") / "endpoint_anomaly_model.joblib"
 endpoint_anomaly_model = joblib.load(_ENDPOINT_MODEL_PATH) if _ENDPOINT_MODEL_PATH.exists() else None
 
 
-def compute_record_graph_features(record_id: int) -> dict:
-    """Best-effort proxy of the Kaggle dataset's per-endpoint features, computed
-    from this app's own risk_events. Not the same distribution the model was
-    trained on (documented in train_endpoint_anomaly_model.py and the README) -
-    treat the resulting score as a rough signal, not a calibrated probability."""
+_pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, kwargs={"row_factory": dict_row}, open=True)
+atexit.register(_pool.close)
+
+
+@contextmanager
+def db():
+    with _pool.connection() as connection:
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def hash_api_key(key: str) -> str:
+    """API keys are high-entropy random tokens (not human passwords), so a fast
+    deterministic hash for exact-match lookup is correct here, not bcrypt."""
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def generate_api_key() -> str:
+    return "sk_" + secrets.token_urlsafe(32)
+
+
+def init_schema() -> None:
+    """Idempotent schema creation. Never drops data - this runs against a real,
+    shared, multi-tenant database, not a disposable demo file."""
+    with db() as c:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                api_key_hash TEXT NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                tenant_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, id)
+            );
+            CREATE TABLE IF NOT EXISTS records (
+                tenant_id TEXT NOT NULL,
+                id INTEGER NOT NULL,
+                owner_id TEXT NOT NULL,
+                data TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, id)
+            );
+            CREATE TABLE IF NOT EXISTS assignments (
+                tenant_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                record_id INTEGER NOT NULL,
+                PRIMARY KEY (tenant_id, subject_id, record_id)
+            );
+            CREATE TABLE IF NOT EXISTS access_grants (
+                tenant_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                record_id INTEGER NOT NULL,
+                expires_at DOUBLE PRECISION NOT NULL,
+                reason TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, subject_id, record_id)
+            );
+            CREATE TABLE IF NOT EXISTS risk_events (
+                tenant_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                allowed BOOLEAN NOT NULL,
+                at DOUBLE PRECISION NOT NULL,
+                endpoint TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_risk_events_tenant_subject ON risk_events(tenant_id, subject, at);
+            CREATE TABLE IF NOT EXISTS risk_strikes (
+                tenant_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                at DOUBLE PRECISION NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_risk_strikes_tenant_subject ON risk_strikes(tenant_id, subject, at);
+            CREATE TABLE IF NOT EXISTS risk_blocks (
+                tenant_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                blocked_until DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (tenant_id, subject)
+            );
+            CREATE TABLE IF NOT EXISTS risk_bans (
+                tenant_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                status TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, subject)
+            );
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id SERIAL PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                occurred_at DOUBLE PRECISION NOT NULL,
+                subject_id TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                "authorization" TEXT,
+                detector_decision TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                explanation TEXT NOT NULL
+            );
+            """
+        )
+
+
+def seed_demo_tenant(force: bool = False) -> None:
+    """Seeds (or, if force=True, wipes-and-reseeds) ONLY the demo tenant's data.
+    Never touches any other tenant - this backs the public demo/dashboard and
+    the /reset button, not a database-wide reset."""
+    demo_hash = bcrypt.hashpw(DEMO_PASSWORD.encode(), bcrypt.gensalt()).decode()
+    admin_hash = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
+
+    with db() as c, c.cursor() as cur:
+        if not force:
+            existing = cur.execute("SELECT 1 FROM tenants WHERE id = %s", (DEMO_TENANT_ID,)).fetchone()
+            if existing:
+                return
+
+        for table in ("access_grants", "assignments", "records", "users",
+                       "risk_events", "risk_strikes", "risk_blocks", "risk_bans"):
+            cur.execute(f"DELETE FROM {table} WHERE tenant_id = %s", (DEMO_TENANT_ID,))
+
+        cur.execute(
+            "INSERT INTO tenants (id, name, api_key_hash, created_at) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            (DEMO_TENANT_ID, "Demo", hash_api_key("demo-key-unused"), time.time()),
+        )
+
+        users = ([("alice", "customer", demo_hash), ("bob", "customer", demo_hash),
+                  ("dr_singh", "doctor", demo_hash), ("dr_lee", "doctor", demo_hash),
+                  ("dr_cover", "doctor", demo_hash), ("support_amy", "support", demo_hash),
+                  ("attacker", "customer", demo_hash), ("attacker_slow", "customer", demo_hash),
+                  (ADMIN_ROLE, ADMIN_ROLE, admin_hash)]
+                 + [(f"attacker_{j}", "customer", demo_hash) for j in range(1, 11)]
+                 + [(f"sybil_{j}", "customer", demo_hash) for j in range(1, 51)])
+        cur.executemany(
+            "INSERT INTO users (tenant_id, id, role, password_hash) VALUES (%s, %s, %s, %s)",
+            [(DEMO_TENANT_ID, *u) for u in users],
+        )
+        records = [(i, "alice" if i <= 50 else "bob", f"confidential record {i}") for i in range(1, 101)]
+        cur.executemany(
+            "INSERT INTO records (tenant_id, id, owner_id, data) VALUES (%s, %s, %s, %s)",
+            [(DEMO_TENANT_ID, *r) for r in records],
+        )
+        cur.executemany(
+            "INSERT INTO assignments (tenant_id, subject_id, record_id) VALUES (%s, %s, %s)",
+            [(DEMO_TENANT_ID, "dr_singh", i) for i in range(1, 26)],
+        )
+        cur.executemany(
+            "INSERT INTO assignments (tenant_id, subject_id, record_id) VALUES (%s, %s, %s)",
+            [(DEMO_TENANT_ID, "dr_lee", i) for i in range(26, 51)],
+        )
+        cur.execute(
+            "INSERT INTO access_grants (tenant_id, subject_id, record_id, expires_at, reason, approved_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (DEMO_TENANT_ID, "support_amy", 17, time.time() + 3600, "ticket-8431", ADMIN_ROLE),
+        )
+        cur.executemany(
+            "INSERT INTO access_grants (tenant_id, subject_id, record_id, expires_at, reason, approved_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            [
+                (DEMO_TENANT_ID, "dr_cover", 8, time.time() + 1800, "shift-cover-ward-a", ADMIN_ROLE),
+                (DEMO_TENANT_ID, "dr_cover", 31, time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
+            ],
+        )
+
+
+def authorization_context(tenant_id: str, subject: str, record_id: int) -> dict:
+    """Authoritative policy for the demo/dashboard's own record model.
+    The learned graph is never an authorization source."""
+    with db() as c:
+        DENY_EXPLANATION = "Access denied: you are not the owner, are not assigned, and have no active delegation."
+        record = c.execute("SELECT owner_id FROM records WHERE tenant_id = %s AND id = %s",
+                            (tenant_id, record_id)).fetchone()
+        if not record:
+            return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
+        if record["owner_id"] == subject:
+            return {"authorization": "owner", "explanations": ["Access allowed: you own this record."], "delegation": None}
+        if c.execute("SELECT 1 FROM assignments WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
+                     (tenant_id, subject, record_id)).fetchone():
+            return {"authorization": "assigned", "explanations": ["Access allowed: you are assigned to this record."], "delegation": None}
+        grant = c.execute(
+            "SELECT expires_at, reason, approved_by FROM access_grants WHERE tenant_id = %s AND subject_id = %s AND record_id = %s",
+            (tenant_id, subject, record_id)).fetchone()
+        if grant and grant["expires_at"] > time.time():
+            seconds_remaining = max(0, int(grant["expires_at"] - time.time()))
+            return {"authorization": "delegated",
+                    "explanations": ["Access allowed: a time-bound delegation is active.",
+                                     f"Delegation reason: {grant['reason']}.",
+                                     f"Approved by: {grant['approved_by']}.",
+                                     f"Access remaining: {seconds_remaining} seconds."],
+                    "delegation": {"reason": grant["reason"], "approved_by": grant["approved_by"],
+                                   "expires_at_unix": round(grant["expires_at"], 3), "seconds_remaining": seconds_remaining}}
+        if grant:
+            return {"authorization": None, "explanations": ["Access denied: your delegated permission has expired."], "delegation": None}
+    return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
+
+
+def record_audit(tenant_id: str, subject: str, record_id: int | str, authorization: str | None,
+                  decision: str, outcome: str, explanations: list[str]) -> None:
+    with db() as c:
+        c.execute(
+            'INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "authorization", '
+            "detector_decision, outcome, explanation) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (tenant_id, time.time(), subject, str(record_id), authorization, decision, outcome, " | ".join(explanations)),
+        )
+
+
+def compute_record_graph_features(tenant_id: str, record_id: int | str) -> dict:
     with db() as c:
         rows = c.execute(
-            "SELECT subject, at, endpoint FROM risk_events WHERE record_id = ? ORDER BY at ASC",
-            (record_id,)).fetchall()
+            "SELECT subject, at, endpoint FROM risk_events WHERE tenant_id = %s AND record_id = %s ORDER BY at ASC",
+            (tenant_id, str(record_id))).fetchall()
     if not rows:
         return {
             "inter_api_access_duration(sec)": 0.0, "api_access_uniqueness": 0.0,
@@ -133,154 +356,19 @@ def compute_record_graph_features(record_id: int) -> dict:
     }
 
 
-def score_record_graph_anomaly(record_id: int) -> dict | None:
-    """Returns the endpoint-level model's prediction for a record, or None if
-    the model hasn't been trained/committed (see train_endpoint_anomaly_model.py)."""
+def score_record_graph_anomaly(tenant_id: str, record_id: int | str) -> dict | None:
     if endpoint_anomaly_model is None:
         return None
-    features = compute_record_graph_features(record_id)
+    features = compute_record_graph_features(tenant_id, record_id)
     frame = pd.DataFrame([features])
     prediction = endpoint_anomaly_model.predict(frame)[0]
     probability = endpoint_anomaly_model.predict_proba(frame)[0][1]
     return {"is_anomalous": bool(prediction), "anomaly_probability": round(float(probability), 4)}
 
 
-@contextmanager
-def db():
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    try:
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
-
-
-@contextmanager
-def audit_db():
-    connection = sqlite3.connect(AUDIT_DB_PATH)
-    connection.row_factory = sqlite3.Row
-    try:
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def init_audit_log() -> None:
-    """Append-only forensic log, deliberately kept in its own file so /reset
-    (which wipes the demo dataset) can never wipe incident history with it."""
-    with audit_db() as c:
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                occurred_at REAL NOT NULL,
-                subject_id TEXT NOT NULL,
-                record_id INTEGER NOT NULL,
-                authorization TEXT,
-                detector_decision TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                explanation TEXT NOT NULL
-            )
-            """
-        )
-
-
-def seed_database() -> None:
-    """Resettable, deterministic demo data: users, records, assignments, grants,
-    and the persistent (SQLite-backed) behavioral risk engine state. All demo
-    accounts share one password (DEMO_PASSWORD) so the hash only needs computing
-    once per reset instead of once per account."""
-    demo_hash = bcrypt.hashpw(DEMO_PASSWORD.encode(), bcrypt.gensalt()).decode()
-    admin_hash = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
-
-    with db() as c:
-        c.executescript(
-            """
-            DROP TABLE IF EXISTS access_grants;
-            DROP TABLE IF EXISTS assignments;
-            DROP TABLE IF EXISTS records;
-            DROP TABLE IF EXISTS users;
-            DROP TABLE IF EXISTS risk_events;
-            DROP TABLE IF EXISTS risk_strikes;
-            DROP TABLE IF EXISTS risk_blocks;
-            DROP TABLE IF EXISTS risk_bans;
-            CREATE TABLE users (id TEXT PRIMARY KEY, role TEXT NOT NULL, password_hash TEXT NOT NULL);
-            CREATE TABLE records (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, data TEXT NOT NULL);
-            CREATE TABLE assignments (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
-                                      PRIMARY KEY(subject_id, record_id));
-            CREATE TABLE access_grants (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
-                                        expires_at REAL NOT NULL, reason TEXT NOT NULL, approved_by TEXT NOT NULL,
-                                        PRIMARY KEY(subject_id, record_id));
-            CREATE TABLE risk_events (subject TEXT NOT NULL, record_id INTEGER NOT NULL,
-                                      allowed INTEGER NOT NULL, at REAL NOT NULL, endpoint TEXT NOT NULL);
-            CREATE INDEX idx_risk_events_subject ON risk_events(subject, at);
-            CREATE TABLE risk_strikes (subject TEXT NOT NULL, at REAL NOT NULL);
-            CREATE INDEX idx_risk_strikes_subject ON risk_strikes(subject, at);
-            CREATE TABLE risk_blocks (subject TEXT PRIMARY KEY, blocked_until REAL NOT NULL);
-            CREATE TABLE risk_bans (subject TEXT PRIMARY KEY, status TEXT NOT NULL);
-            """
-        )
-        users = ([("alice", "customer", demo_hash), ("bob", "customer", demo_hash),
-                  ("dr_singh", "doctor", demo_hash), ("dr_lee", "doctor", demo_hash),
-                  ("dr_cover", "doctor", demo_hash), ("support_amy", "support", demo_hash),
-                  ("attacker", "customer", demo_hash), ("attacker_slow", "customer", demo_hash),
-                  (ADMIN_ROLE, ADMIN_ROLE, admin_hash)]
-                 + [(f"attacker_{j}", "customer", demo_hash) for j in range(1, 11)]
-                 + [(f"sybil_{j}", "customer", demo_hash) for j in range(1, 51)])
-        c.executemany("INSERT INTO users VALUES (?, ?, ?)", users)
-        records = [(i, "alice" if i <= 50 else "bob", f"confidential record {i}") for i in range(1, 101)]
-        c.executemany("INSERT INTO records VALUES (?, ?, ?)", records)
-        c.executemany("INSERT INTO assignments VALUES (?, ?)", [("dr_singh", i) for i in range(1, 26)])
-        c.executemany("INSERT INTO assignments VALUES (?, ?)", [("dr_lee", i) for i in range(26, 51)])
-        # A time-bound delegated/shared record: this must look legitimate to the detector.
-        c.execute("INSERT INTO access_grants VALUES (?, ?, ?, ?, ?)",
-                  ("support_amy", 17, time.time() + 3600, "ticket-8431", ADMIN_ROLE))
-        c.executemany("INSERT INTO access_grants VALUES (?, ?, ?, ?, ?)", [
-            ("dr_cover", 8, time.time() + 1800, "shift-cover-ward-a", ADMIN_ROLE),
-            ("dr_cover", 31, time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
-        ])
-
-
-def authorization_context(subject: str, record_id: int) -> dict:
-    """Authoritative policy. The learned graph is never an authorization source."""
-    with db() as c:
-        DENY_EXPLANATION = "Access denied: you are not the owner, are not assigned, and have no active delegation."
-        record = c.execute("SELECT owner_id FROM records WHERE id = ?", (record_id,)).fetchone()
-        if not record:
-            # Deliberately identical to the "exists but denied" message below: a distinguishable
-            # response would let a caller use record existence as a pre-authorization oracle.
-            return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
-        if record["owner_id"] == subject:
-            return {"authorization": "owner", "explanations": ["Access allowed: you own this record."], "delegation": None}
-        if c.execute("SELECT 1 FROM assignments WHERE subject_id = ? AND record_id = ?", (subject, record_id)).fetchone():
-            return {"authorization": "assigned", "explanations": ["Access allowed: you are assigned to this record."], "delegation": None}
-        grant = c.execute("SELECT expires_at, reason, approved_by FROM access_grants WHERE subject_id = ? AND record_id = ?",
-                          (subject, record_id)).fetchone()
-        if grant and grant["expires_at"] > time.time():
-            seconds_remaining = max(0, int(grant["expires_at"] - time.time()))
-            return {"authorization": "delegated",
-                    "explanations": ["Access allowed: a time-bound delegation is active.",
-                                     f"Delegation reason: {grant['reason']}.",
-                                     f"Approved by: {grant['approved_by']}.",
-                                     f"Access remaining: {seconds_remaining} seconds."],
-                    "delegation": {"reason": grant["reason"], "approved_by": grant["approved_by"],
-                                   "expires_at_unix": round(grant["expires_at"], 3), "seconds_remaining": seconds_remaining}}
-        if grant:
-            return {"authorization": None, "explanations": ["Access denied: your delegated permission has expired."], "delegation": None}
-    return {"authorization": None, "explanations": [DENY_EXPLANATION], "delegation": None}
-
-
-def record_audit(subject: str, record_id: int, authorization: str | None, decision: str, outcome: str, explanations: list[str]) -> None:
-    with audit_db() as c:
-        c.execute("INSERT INTO audit_events (occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (time.time(), subject, record_id, authorization, decision, outcome, " | ".join(explanations)))
-
-
 @dataclass
 class Event:
-    record_id: int
+    record_id: str
     allowed: bool
     at: float
     endpoint: str = "records"
@@ -288,9 +376,8 @@ class Event:
 
 class BehavioralRiskEngine:
     """Sliding-window behavioral detector. All mutable state (events, strikes,
-    blocks, pending/approved bans) lives in SQLite (risk_* tables in demo.db),
-    not in Python-process memory: it survives a server restart and is shared
-    by any process pointed at the same demo.db file."""
+    blocks, pending/approved bans) lives in Postgres, scoped by tenant_id -
+    tenant A's traffic can never affect tenant B's risk scores or blocks."""
 
     def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0,
                  rapid_threshold: int = 4, slow_threshold: int = 15):
@@ -300,143 +387,155 @@ class BehavioralRiskEngine:
         self.rapid_threshold = rapid_threshold
         self.slow_threshold = slow_threshold
 
-    def record_event(self, subject: str, record_id: int, allowed: bool, at: float | None = None, endpoint: str = "records") -> None:
+    def record_event(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
+                      at: float | None = None, endpoint: str = "records") -> None:
         at = at if at is not None else time.time()
         with db() as c:
-            c.execute("INSERT INTO risk_events (subject, record_id, allowed, at, endpoint) VALUES (?, ?, ?, ?, ?)",
-                      (subject, record_id, int(allowed), at, endpoint))
+            c.execute(
+                "INSERT INTO risk_events (tenant_id, subject, record_id, allowed, at, endpoint) VALUES (%s, %s, %s, %s, %s, %s)",
+                (tenant_id, subject, str(record_id), allowed, at, endpoint))
 
-    def _events(self, subject: str, now: float) -> list[Event]:
+    def _events(self, tenant_id: str, subject: str, now: float) -> list[Event]:
         cutoff = now - self.long_window
         with db() as c:
             rows = c.execute(
-                "SELECT record_id, allowed, at, endpoint FROM risk_events WHERE subject = ? AND at > ? ORDER BY at ASC",
-                (subject, cutoff)).fetchall()
+                "SELECT record_id, allowed, at, endpoint FROM risk_events "
+                "WHERE tenant_id = %s AND subject = %s AND at > %s ORDER BY at ASC",
+                (tenant_id, subject, cutoff)).fetchall()
         return [Event(r["record_id"], bool(r["allowed"]), r["at"], r["endpoint"]) for r in rows]
 
-    def get_strike_count(self, subject: str, now: float | None = None) -> int:
+    def get_strike_count(self, tenant_id: str, subject: str, now: float | None = None) -> int:
         now = now or time.time()
         cutoff = now - self.long_window
         with db() as c:
-            c.execute("DELETE FROM risk_strikes WHERE subject = ? AND at <= ?", (subject, cutoff))
-            row = c.execute("SELECT COUNT(*) AS n FROM risk_strikes WHERE subject = ? AND at > ?", (subject, cutoff)).fetchone()
+            c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s AND subject = %s AND at <= %s",
+                      (tenant_id, subject, cutoff))
+            row = c.execute("SELECT COUNT(*) AS n FROM risk_strikes WHERE tenant_id = %s AND subject = %s AND at > %s",
+                             (tenant_id, subject, cutoff)).fetchone()
         return row["n"]
 
-    def _ban_status(self, subject: str) -> str | None:
+    def _ban_status(self, tenant_id: str, subject: str) -> str | None:
         with db() as c:
-            row = c.execute("SELECT status FROM risk_bans WHERE subject = ?", (subject,)).fetchone()
+            row = c.execute("SELECT status FROM risk_bans WHERE tenant_id = %s AND subject = %s",
+                             (tenant_id, subject)).fetchone()
         return row["status"] if row else None
 
-    def _set_ban_status(self, subject: str, status: str) -> None:
+    def _set_ban_status(self, tenant_id: str, subject: str, status: str) -> None:
         with db() as c:
             c.execute(
-                "INSERT INTO risk_bans (subject, status) VALUES (?, ?) "
-                "ON CONFLICT(subject) DO UPDATE SET status = excluded.status",
-                (subject, status))
+                "INSERT INTO risk_bans (tenant_id, subject, status) VALUES (%s, %s, %s) "
+                "ON CONFLICT (tenant_id, subject) DO UPDATE SET status = EXCLUDED.status",
+                (tenant_id, subject, status))
 
-    def _clear_ban_status(self, subject: str) -> None:
+    def _clear_ban_status(self, tenant_id: str, subject: str) -> None:
         with db() as c:
-            c.execute("DELETE FROM risk_bans WHERE subject = ?", (subject,))
+            c.execute("DELETE FROM risk_bans WHERE tenant_id = %s AND subject = %s", (tenant_id, subject))
 
-    def _set_blocked_until(self, subject: str, until: float) -> None:
+    def _set_blocked_until(self, tenant_id: str, subject: str, until: float) -> None:
         with db() as c:
             c.execute(
-                "INSERT INTO risk_blocks (subject, blocked_until) VALUES (?, ?) "
-                "ON CONFLICT(subject) DO UPDATE SET blocked_until = excluded.blocked_until",
-                (subject, until))
+                "INSERT INTO risk_blocks (tenant_id, subject, blocked_until) VALUES (%s, %s, %s) "
+                "ON CONFLICT (tenant_id, subject) DO UPDATE SET blocked_until = EXCLUDED.blocked_until",
+                (tenant_id, subject, until))
 
-    def blocked_until(self, subject: str) -> float:
+    def blocked_until(self, tenant_id: str, subject: str) -> float:
         with db() as c:
-            row = c.execute("SELECT blocked_until FROM risk_blocks WHERE subject = ?", (subject,)).fetchone()
+            row = c.execute("SELECT blocked_until FROM risk_blocks WHERE tenant_id = %s AND subject = %s",
+                             (tenant_id, subject)).fetchone()
         return row["blocked_until"] if row else 0.0
 
-    def register_strike_and_block(self, subject: str, now: float) -> tuple[float, str, int]:
-        """Registers a new strike within the 1-hour window and escalates the penalty."""
+    def register_strike_and_block(self, tenant_id: str, subject: str, now: float) -> tuple[float, str, int]:
         with db() as c:
-            c.execute("INSERT INTO risk_strikes (subject, at) VALUES (?, ?)", (subject, now))
-        count = self.get_strike_count(subject, now)
+            c.execute("INSERT INTO risk_strikes (tenant_id, subject, at) VALUES (%s, %s, %s)",
+                      (tenant_id, subject, now))
+        count = self.get_strike_count(tenant_id, subject, now)
 
         if count == 1:
-            lockout, signal = 120.0, "strike_1_soft_lockout_2m"  # Strike 1: 2-Minute Soft Lockout
+            lockout, signal = 120.0, "strike_1_soft_lockout_2m"
         elif count == 2:
-            lockout, signal = 1800.0, "strike_2_hard_lockout_30m"  # Strike 2: 30-Minute Hard Lockout
-        elif self._ban_status(subject) == "approved":
-            lockout, signal = 315360000.0, "strike_3_permanent_ban_approved"  # Permanent Ban (10 years)
+            lockout, signal = 1800.0, "strike_2_hard_lockout_30m"
+        elif self._ban_status(tenant_id, subject) == "approved":
+            lockout, signal = 315360000.0, "strike_3_permanent_ban_approved"
         else:
-            # Strike 3 requires Admin Approval: place in temporary holding quarantine (30m) pending admin review
-            self._set_ban_status(subject, "pending")
+            self._set_ban_status(tenant_id, subject, "pending")
             lockout, signal = 1800.0, "strike_3_pending_admin_approval"
 
-        self._set_blocked_until(subject, now + lockout)
+        self._set_blocked_until(tenant_id, subject, now + lockout)
         return lockout, signal, count
 
-    def approve_permanent_ban(self, subject: str, now: float | None = None) -> bool:
+    def approve_permanent_ban(self, tenant_id: str, subject: str, now: float | None = None) -> bool:
         now = now or time.time()
-        self._set_ban_status(subject, "approved")
-        self._set_blocked_until(subject, now + 315360000.0)
+        self._set_ban_status(tenant_id, subject, "approved")
+        self._set_blocked_until(tenant_id, subject, now + 315360000.0)
         return True
 
-    def reject_permanent_ban(self, subject: str, now: float | None = None) -> bool:
+    def reject_permanent_ban(self, tenant_id: str, subject: str, now: float | None = None) -> bool:
         now = now or time.time()
-        self._clear_ban_status(subject)
+        self._clear_ban_status(tenant_id, subject)
         with db() as c:
-            row = c.execute("SELECT rowid FROM risk_strikes WHERE subject = ? ORDER BY at DESC LIMIT 1", (subject,)).fetchone()
+            row = c.execute("SELECT ctid FROM risk_strikes WHERE tenant_id = %s AND subject = %s ORDER BY at DESC LIMIT 1",
+                             (tenant_id, subject)).fetchone()
             if row:
-                c.execute("DELETE FROM risk_strikes WHERE rowid = ?", (row["rowid"],))
-        self._set_blocked_until(subject, now + 60.0)
+                c.execute("DELETE FROM risk_strikes WHERE ctid = %s", (row["ctid"],))
+        self._set_blocked_until(tenant_id, subject, now + 60.0)
         return True
 
-    def pending_bans(self) -> list[str]:
+    def pending_bans(self, tenant_id: str) -> list[str]:
         with db() as c:
-            rows = c.execute("SELECT subject FROM risk_bans WHERE status = 'pending'").fetchall()
+            rows = c.execute("SELECT subject FROM risk_bans WHERE tenant_id = %s AND status = 'pending'",
+                              (tenant_id,)).fetchall()
         return [r["subject"] for r in rows]
 
-    def approved_bans(self) -> list[str]:
+    def approved_bans(self, tenant_id: str) -> list[str]:
         with db() as c:
-            rows = c.execute("SELECT subject FROM risk_bans WHERE status = 'approved'").fetchall()
+            rows = c.execute("SELECT subject FROM risk_bans WHERE tenant_id = %s AND status = 'approved'",
+                              (tenant_id,)).fetchall()
         return [r["subject"] for r in rows]
 
-    def cleanup_stale(self) -> None:
+    def cleanup_stale(self, tenant_id: str) -> None:
         now = time.time()
         cutoff = now - self.long_window
         with db() as c:
-            c.execute("DELETE FROM risk_events WHERE at <= ?", (cutoff,))
-            c.execute("DELETE FROM risk_strikes WHERE at <= ?", (cutoff,))
-            c.execute("DELETE FROM risk_blocks WHERE blocked_until < ?", (now,))
+            c.execute("DELETE FROM risk_events WHERE tenant_id = %s AND at <= %s", (tenant_id, cutoff))
+            c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s AND at <= %s", (tenant_id, cutoff))
+            c.execute("DELETE FROM risk_blocks WHERE tenant_id = %s AND blocked_until < %s", (tenant_id, now))
 
-    def reset(self) -> None:
+    def reset(self, tenant_id: str) -> None:
         with db() as c:
-            c.execute("DELETE FROM risk_events")
-            c.execute("DELETE FROM risk_strikes")
-            c.execute("DELETE FROM risk_blocks")
-            c.execute("DELETE FROM risk_bans")
+            c.execute("DELETE FROM risk_events WHERE tenant_id = %s", (tenant_id,))
+            c.execute("DELETE FROM risk_strikes WHERE tenant_id = %s", (tenant_id,))
+            c.execute("DELETE FROM risk_blocks WHERE tenant_id = %s", (tenant_id,))
+            c.execute("DELETE FROM risk_bans WHERE tenant_id = %s", (tenant_id,))
 
-    def active_subject_count(self) -> int:
+    def active_subject_count(self, tenant_id: str) -> int:
         now = time.time()
         with db() as c:
-            row = c.execute("SELECT COUNT(DISTINCT subject) AS n FROM risk_events WHERE at > ?",
-                             (now - self.long_window,)).fetchone()
+            row = c.execute("SELECT COUNT(DISTINCT subject) AS n FROM risk_events WHERE tenant_id = %s AND at > %s",
+                             (tenant_id, now - self.long_window)).fetchone()
         return row["n"]
 
-    def blocked_subject_count(self) -> int:
+    def blocked_subject_count(self, tenant_id: str) -> int:
         now = time.time()
         with db() as c:
-            row = c.execute("SELECT COUNT(*) AS n FROM risk_blocks WHERE blocked_until > ?", (now,)).fetchone()
+            row = c.execute("SELECT COUNT(*) AS n FROM risk_blocks WHERE tenant_id = %s AND blocked_until > %s",
+                             (tenant_id, now)).fetchone()
         return row["n"]
 
-    def coordinated_attacks(self, threshold: int = 50) -> dict:
+    def coordinated_attacks(self, tenant_id: str, threshold: int = 50) -> dict:
         with db() as c:
             rows = c.execute(
-                "SELECT record_id, COUNT(DISTINCT subject) AS n FROM risk_events WHERE allowed = 0 "
-                "GROUP BY record_id HAVING n >= ?", (threshold,)).fetchall()
+                "SELECT record_id, COUNT(DISTINCT subject) AS n FROM risk_events "
+                "WHERE tenant_id = %s AND allowed = false GROUP BY record_id HAVING COUNT(DISTINCT subject) >= %s",
+                (tenant_id, threshold)).fetchall()
         return {r["record_id"]: r["n"] for r in rows}
 
-    def evaluate(self, subject: str, record_id: int, allowed: bool, endpoint: str = "records") -> tuple[str, list[str], bool, int, str]:
+    def evaluate(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
+                 endpoint: str = "records") -> tuple[str, list[str], bool, int, str]:
         now = time.time()
 
-        if self.blocked_until(subject) > now:
-            strike_count = self.get_strike_count(subject, now)
-            status = self._ban_status(subject)
+        if self.blocked_until(tenant_id, subject) > now:
+            strike_count = self.get_strike_count(tenant_id, subject, now)
+            status = self._ban_status(tenant_id, subject)
             if status == "approved":
                 sig = "strike_3_permanent_ban_approved"
             elif status == "pending" or strike_count >= 3:
@@ -447,23 +546,23 @@ class BehavioralRiskEngine:
                 sig = "strike_1_soft_lockout_2m"
             return "block", ["temporarily_blocked", sig], False, 100, "Attack"
 
-        self.record_event(subject, record_id, allowed, now, endpoint)
+        self.record_event(tenant_id, subject, record_id, allowed, now, endpoint)
 
-        score_data = self.compute_risk(subject, now)
+        score_data = self.compute_risk(tenant_id, subject, now)
         score, signals, category = score_data["score"], score_data["signals"], score_data["category"]
 
-        unseen = False  # Kept for compatibility if necessary
+        unseen = False
         decision = "allow" if allowed else "deny"
         if score >= 90:
             decision = "block"
-            lockout, strike_sig, count = self.register_strike_and_block(subject, now)
+            lockout, strike_sig, count = self.register_strike_and_block(tenant_id, subject, now)
             signals.append("blocked_due_to_high_risk")
             signals.append(strike_sig)
 
         return decision, signals, unseen, score, category
 
-    def compute_risk(self, subject: str, now: float) -> dict:
-        q = self._events(subject, now)
+    def compute_risk(self, tenant_id: str, subject: str, now: float) -> dict:
+        q = self._events(tenant_id, subject, now)
 
         denied_all = [e for e in q if not e.allowed]
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
@@ -483,8 +582,16 @@ class BehavioralRiskEngine:
         elif unique_denied_short > 0:
             contributions["unique_denied_short"] = unique_denied_short * 10
 
-        # Sequential short
-        short_ids = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint == "records"]
+        # Sequential short - best-effort: only numeric record_ids can show a "step"
+        # pattern; arbitrary string resource_ids (e.g. from external /v1/authorize
+        # tenants) simply never trip this signal, a documented limitation.
+        short_ids_raw = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint == "records"]
+        short_ids = []
+        for rid in short_ids_raw:
+            try:
+                short_ids.append(int(rid))
+            except (TypeError, ValueError):
+                pass
         sequential_steps = sum(1 for a, b in zip(short_ids, short_ids[1:]) if abs(b - a) == 1)
         if sequential_steps >= 2:
             contributions["sequential_id_enumeration"] = 35
@@ -517,17 +624,13 @@ class BehavioralRiskEngine:
 
         score = min(100, sum(contributions.values()))
 
-        if self.blocked_until(subject) > now:
-            # Forcing score to 100 while blocked must not desync it from
-            # `sum(contributions)` - callers (dashboard, benchmark checks)
-            # rely on that invariant. Fold the gap into an explicit entry
-            # instead of leaving contributions under-reporting the score.
+        if self.blocked_until(tenant_id, subject) > now:
             contributions["blocked_override"] = 100 - sum(contributions.values())
             score = 100
             if "temporarily_blocked" not in signals:
                 signals.append("temporarily_blocked")
-            strike_count = self.get_strike_count(subject, now)
-            status = self._ban_status(subject)
+            strike_count = self.get_strike_count(tenant_id, subject, now)
+            status = self._ban_status(tenant_id, subject)
             if status == "approved":
                 if "strike_3_permanent_ban_approved" not in signals:
                     signals.append("strike_3_permanent_ban_approved")
@@ -565,17 +668,17 @@ def health() -> dict:
 
 
 def _rate_limit_key(request: Request) -> str:
-    """Rate-limit per authenticated identity when a bearer token is present
-    (so one attacker can't dodge the limit by spraying requests from many IPs
-    behind a NAT), falling back to client IP for unauthenticated calls."""
     authorization = request.headers.get("Authorization", "")
     if authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
-            return f"subject:{payload.get('sub', 'unknown')}"
+            return f"subject:{payload.get('tenant_id', '?')}:{payload.get('sub', 'unknown')}"
         except jwt.InvalidTokenError:
             pass
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key:
+        return f"apikey:{hash_api_key(api_key)[:16]}"
     return get_remote_address(request)
 
 
@@ -584,16 +687,15 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-def create_access_token(subject: str, role: str) -> str:
+def create_access_token(subject: str, role: str, tenant_id: str) -> str:
     now = time.time()
-    payload = {"sub": subject, "role": role, "iat": now, "exp": now + JWT_EXPIRY_SECONDS}
+    payload = {"sub": subject, "role": role, "tenant_id": tenant_id, "iat": now, "exp": now + JWT_EXPIRY_SECONDS}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def get_current_identity(authorization: str | None = Header(default=None)) -> tuple[str, str]:
+def get_current_identity(authorization: str | None = Header(default=None)) -> tuple[str, str, str]:
     """Real authentication: a signed, time-bound JWT bearer token, verified
-    server-side. Replaces the old design where the client-supplied X-Subject
-    header was trusted as-is."""
+    server-side, scoped to a single tenant via the tenant_id claim."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Missing or malformed Authorization header (expected 'Bearer <token>')")
     token = authorization.split(" ", 1)[1]
@@ -603,7 +705,19 @@ def get_current_identity(authorization: str | None = Header(default=None)) -> tu
         raise HTTPException(401, "Token expired, please log in again")
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid authentication token")
-    return payload["sub"], payload.get("role", "customer")
+    return payload["sub"], payload.get("role", "customer"), payload.get("tenant_id", DEMO_TENANT_ID)
+
+
+def get_tenant_from_api_key(x_api_key: str | None = Header(default=None)) -> str:
+    """Product-API auth: a per-tenant API key (server-to-server), separate from
+    the JWT user-login flow the demo dashboard uses."""
+    if not x_api_key:
+        raise HTTPException(401, "Missing X-API-Key header")
+    with db() as c:
+        row = c.execute("SELECT id FROM tenants WHERE api_key_hash = %s", (hash_api_key(x_api_key),)).fetchone()
+    if not row:
+        raise HTTPException(401, "Invalid API key")
+    return row["id"]
 
 
 def require_security_admin(role: str) -> None:
@@ -612,12 +726,9 @@ def require_security_admin(role: str) -> None:
 
 
 def guard_demo_endpoint(authorization: str | None = Header(default=None)) -> None:
-    """/reset and /simulate/* are open by design in DEMO_MODE (so the dashboard's
-    Reset/Simulator buttons work without login). Outside DEMO_MODE, require a
-    security_admin bearer token instead."""
     if DEMO_MODE:
         return
-    subject, role = get_current_identity(authorization)
+    subject, role, _tenant_id = get_current_identity(authorization)
     require_security_admin(role)
 
 
@@ -640,7 +751,7 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
 
 
 @app.post("/auth/register")
-@limiter.limit("1000/minute")
+@limiter.limit("100/minute")
 def register(request: Request, payload: dict) -> dict:
     subject = payload.get("subject")
     password = payload.get("password")
@@ -651,9 +762,10 @@ def register(request: Request, payload: dict) -> dict:
         raise HTTPException(400, f"Cannot self-register with the {ADMIN_ROLE} role")
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     with db() as c:
-        if c.execute("SELECT 1 FROM users WHERE id = ?", (subject,)).fetchone():
+        if c.execute("SELECT 1 FROM users WHERE tenant_id = %s AND id = %s", (DEMO_TENANT_ID, subject)).fetchone():
             raise HTTPException(409, "Subject already registered")
-        c.execute("INSERT INTO users (id, role, password_hash) VALUES (?, ?, ?)", (subject, role, password_hash))
+        c.execute("INSERT INTO users (tenant_id, id, role, password_hash) VALUES (%s, %s, %s, %s)",
+                  (DEMO_TENANT_ID, subject, role, password_hash))
     return {"status": "registered", "subject": subject, "role": role}
 
 
@@ -665,37 +777,38 @@ def login(request: Request, payload: dict) -> dict:
     if not subject or not password:
         raise HTTPException(400, "subject and password are required")
     with db() as c:
-        row = c.execute("SELECT role, password_hash FROM users WHERE id = ?", (subject,)).fetchone()
+        row = c.execute("SELECT role, password_hash FROM users WHERE tenant_id = %s AND id = %s",
+                         (DEMO_TENANT_ID, subject)).fetchone()
     if not row or not bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
         raise HTTPException(401, "Invalid subject or password")
-    token = create_access_token(subject, row["role"])
+    token = create_access_token(subject, row["role"], DEMO_TENANT_ID)
     return {"access_token": token, "token_type": "bearer", "subject": subject, "role": row["role"], "expires_in": JWT_EXPIRY_SECONDS}
 
 
 @app.post("/reset")
 @limiter.limit("60/minute")
 def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
-    seed_database()
-    engine.reset()
+    seed_demo_tenant(force=True)
+    engine.reset(DEMO_TENANT_ID)
     return {"status": "reset"}
 
 
 soc_alerts: list[dict] = []
 
 
-def dispatch_soc_alert(subject: str, record_id: int, score: int, category: str, signals: list[str]) -> dict:
-    """Dispatches a structured forensic payload to SIEM/SOC and appends to in-memory audit queue."""
-    strikes = max(1, engine.get_strike_count(subject))
+def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score: int, category: str, signals: list[str]) -> dict:
+    strikes = max(1, engine.get_strike_count(tenant_id, subject))
     tier = "PERMANENT_BLACKLIST" if strikes >= 3 else ("HARD_LOCKOUT_30M" if strikes == 2 else "SOFT_LOCKOUT_2M")
     mitigation = "PERMANENT_IDENTITY_BLACKLIST (Strike 3/3)" if strikes >= 3 else ("AUTOMATIC_IDENTITY_LOCKOUT_30M (Strike 2/3)" if strikes == 2 else "AUTOMATIC_IDENTITY_LOCKOUT_120S (Strike 1/3)")
 
     alert_payload = {
         "alert_id": f"SOC-ALERT-{int(time.time() * 1000)}",
+        "tenant_id": tenant_id,
         "timestamp": time.time(),
         "severity": "CRITICAL" if (score >= 90 or strikes >= 2) else "HIGH",
         "threat_type": "BOLA_ENUMERATION_ATTACK",
         "attacker_identity": subject,
-        "targeted_record_id": record_id,
+        "targeted_record_id": str(record_id),
         "risk_score": score,
         "risk_category": category,
         "signals_tripped": signals,
@@ -714,13 +827,13 @@ def dispatch_soc_alert(subject: str, record_id: int, score: int, category: str, 
 @app.get("/records/{record_id}")
 @limiter.limit("1000/minute")
 def get_record(record_id: int, request: Request, response: Response,
-               identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    subject, _role = identity
+               identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role, tenant_id = identity
 
-    access = authorization_context(subject, record_id)
+    access = authorization_context(tenant_id, subject, record_id)
     authorization = access["authorization"]
 
-    decision, signals, unseen, score, category = engine.evaluate(subject, record_id, authorization is not None)
+    decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, record_id, authorization is not None)
     detector_explanations = explain_detector_signals(signals)
     explanations = access["explanations"] + detector_explanations
 
@@ -732,33 +845,35 @@ def get_record(record_id: int, request: Request, response: Response,
 
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
-        record_audit(subject, record_id, authorization, decision, "blocked", explanations)
-        # 🚨 Trigger Real-Time SOC Incident Alert
-        dispatch_soc_alert(subject, record_id, score, category, signals)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "signals": signals,
                                          "explanations": explanations, "score": score, "category": category,
                                          "soc_alert_dispatched": True},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     if authorization is None:
-        record_audit(subject, record_id, authorization, decision, "denied", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     with db() as c:
-        row = c.execute("SELECT id, owner_id, data FROM records WHERE id = ?", (record_id,)).fetchone()
-    record_audit(subject, record_id, authorization, decision, "allowed", explanations)
+        row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
+                         (tenant_id, record_id)).fetchone()
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations)
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
             "score": score, "category": category}
 
 
 @app.get("/audit-events")
-def get_audit_events(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    _subject, role = identity
+def get_audit_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role, tenant_id = identity
     require_security_admin(role)
-    with audit_db() as c:
-        rows = c.execute("SELECT id, occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation FROM audit_events ORDER BY id DESC LIMIT 100").fetchall()
+    with db() as c:
+        rows = c.execute(
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 100", (tenant_id,)).fetchall()
     return {"events": [dict(row) for row in rows]}
 
 
@@ -775,7 +890,6 @@ def simulate_normal(request: Request, _guard: None = Depends(guard_demo_endpoint
     client = TestClient(app)
     headers = _login_headers(client, "alice")
     results = []
-    # Alice requests her own records 1 to 50
     for i in range(1, 51):
         res = client.get(f"/records/{i}", headers=headers)
         results.append(res.status_code)
@@ -788,7 +902,6 @@ def simulate_rapid(request: Request, _guard: None = Depends(guard_demo_endpoint)
     client = TestClient(app)
     headers = _login_headers(client, "attacker_1")
     results = []
-    # Attacker rapidly asks for ids 51 to 55
     for i in range(51, 56):
         res = client.get(f"/records/{i}", headers=headers)
         results.append({"id": i, "status": res.status_code, "risk": res.headers.get("X-Risk-Score"), "category": res.headers.get("X-Risk-Category")})
@@ -804,11 +917,10 @@ def simulate_low_and_slow(request: Request, _guard: None = Depends(guard_demo_en
     subject = "attacker_slow"
     now = time.time()
 
-    # Generate 15 failed requests spaced over the hour
     for i in range(15):
         event_time = now - (3600) + (i * 240)
-        engine.record_event(subject, 50 + i, False, event_time)
-        record_audit(subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"])
+        engine.record_event(DEMO_TENANT_ID, subject, 50 + i, False, event_time)
+        record_audit(DEMO_TENANT_ID, subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"])
 
     headers = _login_headers(client, subject)
     res = client.get("/records/66", headers=headers)
@@ -820,7 +932,6 @@ def simulate_low_and_slow(request: Request, _guard: None = Depends(guard_demo_en
 def simulate_coordinated(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     from fastapi.testclient import TestClient
     client = TestClient(app)
-    # Simulate 50 sybils hitting record 1
     for i in range(1, 51):
         headers = _login_headers(client, f"sybil_{i}")
         client.get("/records/1", headers=headers)
@@ -828,17 +939,17 @@ def simulate_coordinated(request: Request, _guard: None = Depends(guard_demo_end
 
 
 @app.get("/users/{user_id}")
-def get_user(user_id: int, response: Response, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    subject, _role = identity
-    decision, signals, unseen, score, category = engine.evaluate(subject, user_id, False, endpoint="users")
+def get_user(user_id: int, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role, tenant_id = identity
+    decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, user_id, False, endpoint="users")
     if decision == "block":
         raise HTTPException(403, detail={"outcome": "blocked", "score": score, "category": category})
     raise HTTPException(403, detail={"outcome": "denied", "score": score, "category": category})
 
 @app.get("/invoices/{invoice_id}")
-def get_invoice(invoice_id: int, response: Response, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    subject, _role = identity
-    decision, signals, unseen, score, category = engine.evaluate(subject, invoice_id, False, endpoint="invoices")
+def get_invoice(invoice_id: int, response: Response, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role, tenant_id = identity
+    decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, invoice_id, False, endpoint="invoices")
     if decision == "block":
         raise HTTPException(403, detail={"outcome": "blocked", "score": score, "category": category})
     raise HTTPException(403, detail={"outcome": "denied", "score": score, "category": category})
@@ -854,34 +965,37 @@ def get_config() -> dict:
         "strike_2_duration": "30m (Hard)",
         "strike_3_duration": "Permanent (Blacklist)",
         "ai_anomaly_detection": "IsolationForest (scikit-learn)",
-        "auth": "JWT bearer tokens (HS256)",
-        "state_backend": "SQLite (persistent, shared across processes via demo.db)"
+        "auth": "JWT bearer tokens (HS256) for the dashboard; per-tenant API keys for /v1/*",
+        "state_backend": "Postgres (multi-tenant, tenant_id-scoped)"
     }
 
 @app.get("/stats")
 def get_stats() -> dict:
-    engine.cleanup_stale()
-    return {"active_subjects": engine.active_subject_count(), "blocked_subjects": engine.blocked_subject_count(),
-            "coordinated_attacks": engine.coordinated_attacks()}
+    engine.cleanup_stale(DEMO_TENANT_ID)
+    return {"active_subjects": engine.active_subject_count(DEMO_TENANT_ID),
+            "blocked_subjects": engine.blocked_subject_count(DEMO_TENANT_ID),
+            "coordinated_attacks": engine.coordinated_attacks(DEMO_TENANT_ID)}
 
 @app.get("/events")
-def get_events(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    # Same audit data as /audit-events (kept for backward compatibility); must carry the same gate.
-    _subject, role = identity
+def get_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role, tenant_id = identity
     require_security_admin(role)
-    with audit_db() as c:
-        rows = c.execute("SELECT id, occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation FROM audit_events ORDER BY id DESC LIMIT 50").fetchall()
+    with db() as c:
+        rows = c.execute(
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 50", (tenant_id,)).fetchall()
     return {"events": [dict(row) for row in rows]}
 
 @app.get("/risk/{subject}")
 def get_risk(subject: str) -> dict:
     now = time.time()
-    res = engine.compute_risk(subject, now)
-    strikes = engine.get_strike_count(subject, now)
-    blocked_until = engine.blocked_until(subject)
+    tenant_id = DEMO_TENANT_ID
+    res = engine.compute_risk(tenant_id, subject, now)
+    strikes = engine.get_strike_count(tenant_id, subject, now)
+    blocked_until = engine.blocked_until(tenant_id, subject)
     is_blocked = blocked_until > now
     remaining = int(blocked_until - now) if is_blocked else 0
-    status = engine._ban_status(subject)
+    status = engine._ban_status(tenant_id, subject)
     is_pending = status == "pending" or (strikes >= 3 and status != "approved" and is_blocked)
     is_approved = status == "approved" or (is_blocked and remaining > 86400 * 30)
     return {
@@ -899,71 +1013,49 @@ def get_risk(subject: str) -> dict:
     }
 
 
-@app.get("/records/{record_id}/graph-risk")
-def get_record_graph_risk(record_id: int, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Endpoint-level access-graph anomaly score from the real-data-trained
-    model (see train_endpoint_anomaly_model.py). Separate from the per-subject
-    behavioral score at /risk/{subject}; requires login but not admin."""
-    result = score_record_graph_anomaly(record_id)
-    if result is None:
-        raise HTTPException(503, "Endpoint anomaly model not trained yet - run train_endpoint_anomaly_model.py")
-    return {"record_id": record_id, **result, "features": compute_record_graph_features(record_id)}
-
-
 @app.post("/admin/approve-ban/{subject}")
-def approve_permanent_ban_endpoint(subject: str, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Admin approves permanent firewall ban for Strike 3 offender."""
-    caller, role = identity
+def approve_permanent_ban_endpoint(subject: str, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    caller, role, tenant_id = identity
     require_security_admin(role)
-    engine.approve_permanent_ban(subject)
-    record_audit(subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin '{caller}' APPROVED Permanent Firewall Ban for '{subject}'"])
+    engine.approve_permanent_ban(tenant_id, subject)
+    record_audit(tenant_id, subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin '{caller}' APPROVED Permanent Firewall Ban for '{subject}'"])
     return {"status": "permanent_ban_approved", "subject": subject, "is_permanent": True}
 
 
 @app.post("/admin/reject-ban/{subject}")
-def reject_permanent_ban_endpoint(subject: str, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Admin dismisses permanent ban and relaxes penalty for false-positive or pentester."""
-    caller, role = identity
+def reject_permanent_ban_endpoint(subject: str, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    caller, role, tenant_id = identity
     require_security_admin(role)
-    engine.reject_permanent_ban(subject)
-    record_audit(subject, 0, "ADMIN_AUTHORITY", "allow", "allowed", [f"Admin '{caller}' DISMISSED Permanent Ban for '{subject}' (Quarantine Relaxed)"])
+    engine.reject_permanent_ban(tenant_id, subject)
+    record_audit(tenant_id, subject, 0, "ADMIN_AUTHORITY", "allow", "allowed", [f"Admin '{caller}' DISMISSED Permanent Ban for '{subject}' (Quarantine Relaxed)"])
     return {"status": "ban_dismissed", "subject": subject, "is_permanent": False}
 
 
 @app.get("/admin/pending-bans")
-def get_pending_bans(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Returns all subjects currently awaiting administrative ban approval."""
-    _subject, role = identity
+def get_pending_bans(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role, tenant_id = identity
     require_security_admin(role)
-    return {"pending_bans": engine.pending_bans(), "approved_bans": engine.approved_bans()}
+    return {"pending_bans": engine.pending_bans(tenant_id), "approved_bans": engine.approved_bans(tenant_id)}
 
 
 @app.get("/soc/alerts")
-def get_soc_alerts(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Returns real-time forensic alerts dispatched to the SOC / SIEM."""
-    _subject, role = identity
+def get_soc_alerts(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role, tenant_id = identity
     require_security_admin(role)
-    return {
-        "total_alerts": len(soc_alerts),
-        "recent_alerts": soc_alerts[:20]
-    }
+    tenant_alerts = [a for a in soc_alerts if a.get("tenant_id") == tenant_id]
+    return {"total_alerts": len(tenant_alerts), "recent_alerts": tenant_alerts[:20]}
 
 
 @app.post("/soc/test-webhook")
-def test_soc_webhook(payload: dict | None = None, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
-    """Trigger or receive external SOC alert webhook and log to audit events."""
-    _subject, role = identity
+def test_soc_webhook(payload: dict | None = None, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role, tenant_id = identity
     require_security_admin(role)
     if not payload:
         payload = dispatch_soc_alert(
-            subject="simulated_adversary",
-            record_id=999,
-            score=100,
-            category="Attack",
+            tenant_id, subject="simulated_adversary", record_id=999, score=100, category="Attack",
             signals=["unauthorized_unique_object_pressure", "sequential_id_enumeration", "manual_test"]
         )
     else:
-        # Record into audit events table so it appears in live frontend dashboard
         subject = payload.get("attacker_identity", "external_attacker")
         target_id = payload.get("targeted_object_id", 0)
         signals = payload.get("signals_tripped", ["bola_attempt"])
@@ -971,33 +1063,85 @@ def test_soc_webhook(payload: dict | None = None, identity: tuple[str, str] = De
         outcome = "blocked" if decision == "block" else "denied"
         explanation = f"External BOLA Activity: {','.join(signals)}" if outcome == "blocked" else f"External Object Denied: Attempted {target_id}"
 
-        # Feed into behavioral risk engine so /risk/{subject} and /stats reflect it
-        engine.record_event(subject, target_id, False, time.time(), "records")
+        engine.record_event(tenant_id, subject, target_id, False, time.time(), "records")
         if decision == "block":
-            lockout, strike_sig, count = engine.register_strike_and_block(subject, time.time())
+            lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, time.time())
             if strike_sig not in signals:
                 signals.append(strike_sig)
             score = payload.get("risk_score", 100)
             category = payload.get("risk_category", "Attack")
-            dispatch_soc_alert(subject, target_id, score, category, signals)
+            dispatch_soc_alert(tenant_id, subject, target_id, score, category, signals)
 
-        record_audit(subject, target_id, None, decision, outcome, [explanation])
+        record_audit(tenant_id, subject, target_id, None, decision, outcome, [explanation])
     return {"status": "alert_logged_and_synced", "payload": payload}
 
 
-def ensure_database() -> None:
-    """Bootstrap demo.db on first run only. A bare `seed_database()` call here
-    would wipe the persistent risk-engine state (and demo accounts) on every
-    server restart, defeating the point of moving that state into SQLite."""
-    if not DB_PATH.exists():
-        seed_database()
-        return
+@app.get("/records/{record_id}/graph-risk")
+def get_record_graph_risk(record_id: int, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    _subject, _role, tenant_id = identity
+    result = score_record_graph_anomaly(tenant_id, record_id)
+    if result is None:
+        raise HTTPException(503, "Endpoint anomaly model not trained yet - run train_endpoint_anomaly_model.py")
+    return {"record_id": record_id, **result, "features": compute_record_graph_features(tenant_id, record_id)}
+
+
+# --- Product API: what other companies' backends actually integrate against ---
+# Server-to-server, authenticated by a per-tenant API key (not the demo's JWT
+# login flow). The caller already knows whether the requesting subject is
+# authorized for the resource (their own object model, not ours) - this
+# endpoint's job is purely the behavioral/risk layer on top of that decision.
+
+@app.post("/v1/tenants")
+@limiter.limit("10/minute")
+def create_tenant(request: Request, payload: dict, x_signup_key: str | None = Header(default=None)) -> dict:
+    if x_signup_key != TENANT_SIGNUP_KEY:
+        raise HTTPException(403, "Invalid signup key")
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(400, "name is required")
+    tenant_id = secrets.token_hex(8)
+    api_key = generate_api_key()
     with db() as c:
-        try:
-            c.execute("SELECT password_hash FROM users LIMIT 1")
-        except sqlite3.OperationalError:
-            seed_database()  # stale schema from before auth support was added
+        c.execute("INSERT INTO tenants (id, name, api_key_hash, created_at) VALUES (%s, %s, %s, %s)",
+                  (tenant_id, name, hash_api_key(api_key), time.time()))
+    return {
+        "tenant_id": tenant_id,
+        "name": name,
+        "api_key": api_key,
+        "warning": "This API key is shown once and cannot be retrieved again - store it securely.",
+    }
 
 
-init_audit_log()
+@app.post("/v1/authorize")
+@limiter.limit("1000/minute")
+def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_tenant_from_api_key)) -> dict:
+    subject = payload.get("subject")
+    resource_id = payload.get("resource_id")
+    authorized = bool(payload.get("authorized", False))
+    if not subject or resource_id is None:
+        raise HTTPException(400, "subject and resource_id are required")
+
+    decision, signals, _unseen, score, category = engine.evaluate(tenant_id, subject, resource_id, authorized, endpoint="v1")
+    detector_explanations = explain_detector_signals(signals)
+
+    outcome = "blocked" if decision == "block" else ("allowed" if authorized else "denied")
+    record_audit(tenant_id, subject, resource_id, "authorized" if authorized else None, decision, outcome, detector_explanations)
+    if decision == "block":
+        dispatch_soc_alert(tenant_id, subject, resource_id, score, category, signals)
+
+    final_decision = "block" if decision == "block" else ("allow" if authorized else "deny")
+    return {
+        "decision": final_decision,
+        "score": score,
+        "category": category,
+        "signals": signals,
+        "explanations": detector_explanations,
+    }
+
+
+def ensure_database() -> None:
+    init_schema()
+    seed_demo_tenant(force=False)
+
+
 ensure_database()

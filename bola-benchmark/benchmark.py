@@ -21,7 +21,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app import app, db, engine, DEMO_PASSWORD
+from app import app, db, engine, DEMO_PASSWORD, DEMO_TENANT_ID
 
 RESULTS_DIR = Path(__file__).with_name("results")
 client = TestClient(app)
@@ -98,8 +98,9 @@ def run_scenarios() -> list[dict]:
     reset()
     with db() as c:
         c.execute(
-            "INSERT INTO access_grants VALUES (?, ?, ?, ?, ?)",
-            ("support_amy", 42, time.time() - 3600, "expired-ticket", "security_admin"),
+            "INSERT INTO access_grants (tenant_id, subject_id, record_id, expires_at, reason, approved_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (DEMO_TENANT_ID, "support_amy", 42, time.time() - 3600, "expired-ticket", "security_admin"),
         )
     r = call("expired_delegation", "GET", "/records/42", "support_amy")
     expect("expired_delegation_denied", r["status_code"] == 403, f"status={r['status_code']}")
@@ -202,7 +203,7 @@ def run_warmup_curve() -> list[dict]:
                 "signals": "|".join(risk["signals"]),
             }
         )
-        if engine.blocked_until(subject) > time.time():
+        if engine.blocked_until(DEMO_TENANT_ID, subject) > time.time():
             break
     return rows
 
