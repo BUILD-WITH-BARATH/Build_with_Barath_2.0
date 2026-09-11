@@ -83,16 +83,63 @@ export default function App() {
   const [auditFilter, setAuditFilter] = useState<'all' | 'blocked' | 'denied' | 'allowed'>('all');
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedEventDetail, setSelectedEventDetail] = useState<any | null>(null);
+
+  // Real login: the JWT lives only in memory (React state), never localStorage,
+  // and is the *logged-in user's own* token - not a hardcoded admin credential.
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authSubject, setAuthSubject] = useState<string | null>(null);
+  const [authRole, setAuthRole] = useState<string | null>(null);
+  const [loginSubject, setLoginSubject] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const isAdmin = authRole === 'security_admin';
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoggingIn(true);
+    setLoginError(null);
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: loginSubject, password: loginPassword }),
+      });
+      if (!res.ok) {
+        setLoginError('Invalid subject or password.');
+        setLoggingIn(false);
+        return;
+      }
+      const data = await res.json();
+      setAuthToken(data.access_token);
+      setAuthSubject(data.subject);
+      setAuthRole(data.role);
+      setSelectedSubject(data.subject);
+    } catch (err) {
+      setLoginError('Could not reach the backend.');
+    }
+    setLoggingIn(false);
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    setAuthSubject(null);
+    setAuthRole(null);
+  };
+
   const fetchData = async (subjectToFetch?: string) => {
     const subj = subjectToFetch !== undefined ? subjectToFetch : (selectedSubject || 'alice');
     try {
-      const [statsRes, eventsRes, riskRes, configRes] = await Promise.all([
+      const requests: Promise<Response>[] = [
         fetch(`${API_BASE}/stats`),
-        fetch(`${API_BASE}/audit-events`, { headers: { 'X-Subject': 'security_admin' } }),
+        isAdmin && authToken
+          ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${authToken}` } })
+          : Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 })),
         fetch(`${API_BASE}/risk/${subj || 'alice'}`),
         fetch(`${API_BASE}/config`),
-      ]);
-      
+      ];
+      const [statsRes, eventsRes, riskRes, configRes] = await Promise.all(requests);
+
       if (statsRes.ok) setStats(await statsRes.json());
       if (eventsRes.ok) {
         const evData = await eventsRes.json();
@@ -107,10 +154,11 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!authToken) return;
     fetchData();
     const interval = setInterval(() => fetchData(), 2000);
     return () => clearInterval(interval);
-  }, [selectedSubject]);
+  }, [selectedSubject, authToken, authRole]);
 
   const simulate = async (type: string) => {
     setIsSimulating(true);
@@ -145,8 +193,9 @@ export default function App() {
   };
 
   const approvePermanentBan = async (subject: string) => {
+    if (!isAdmin || !authToken) return;
     try {
-      await fetch(`${API_BASE}/admin/approve-ban/${subject}`, { method: 'POST' });
+      await fetch(`${API_BASE}/admin/approve-ban/${subject}`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } });
       await fetchData(subject);
     } catch (err) {
       console.error(err);
@@ -154,8 +203,9 @@ export default function App() {
   };
 
   const rejectPermanentBan = async (subject: string) => {
+    if (!isAdmin || !authToken) return;
     try {
-      await fetch(`${API_BASE}/admin/reject-ban/${subject}`, { method: 'POST' });
+      await fetch(`${API_BASE}/admin/reject-ban/${subject}`, { method: 'POST', headers: { Authorization: `Bearer ${authToken}` } });
       await fetchData(subject);
     } catch (err) {
       console.error(err);
@@ -253,9 +303,52 @@ export default function App() {
     }
   };
 
+  if (!authToken) {
+    return (
+      <div className="min-h-screen bg-[#090D16] text-slate-100 font-sans flex items-center justify-center px-4">
+        <form onSubmit={handleLogin} className="w-full max-w-sm bg-[#0E1424]/95 border border-slate-800/80 rounded-3xl p-8 shadow-2xl space-y-5">
+          <div className="text-center space-y-1">
+            <ShieldCheck className="w-8 h-8 mx-auto text-cyan-400" />
+            <h1 className="font-display font-bold text-lg text-white">CyberAccess SOC Login</h1>
+            <p className="text-xs text-slate-400 font-sans">Sign in with any registered subject. Demo accounts share one password.</p>
+          </div>
+          <div className="space-y-3">
+            <input
+              type="text"
+              placeholder="subject (e.g. alice, security_admin)"
+              value={loginSubject}
+              onChange={(e) => setLoginSubject(e.target.value)}
+              className="w-full px-4 py-2.5 bg-slate-950/70 border border-slate-700 rounded-xl text-sm font-mono text-slate-100 outline-none focus:border-cyan-500"
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              placeholder="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              className="w-full px-4 py-2.5 bg-slate-950/70 border border-slate-700 rounded-xl text-sm font-mono text-slate-100 outline-none focus:border-cyan-500"
+              autoComplete="current-password"
+            />
+          </div>
+          {loginError && <p className="text-xs text-rose-400 font-sans">{loginError}</p>}
+          <button
+            type="submit"
+            disabled={loggingIn || !loginSubject || !loginPassword}
+            className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm rounded-xl transition-all active:scale-95"
+          >
+            {loggingIn ? 'Signing in...' : 'Sign In'}
+          </button>
+          <p className="text-[11px] text-slate-500 font-sans text-center">
+            No account yet? Register via <code className="text-slate-400">POST /auth/register</code> against the API directly (demo prototype has no self-serve signup UI).
+          </p>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#090D16] text-slate-100 font-sans selection:bg-indigo-500/25 selection:text-white flex flex-col antialiased bg-cyber-grid">
-      
+
       {/* Cyber Screen Laser Scanline & Chromatic Flash Sweep */}
       <div key={`flash-${currentTab}`} className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
         <div className="absolute inset-0 animate-cyber-flash" />
@@ -296,6 +389,20 @@ export default function App() {
                   BOLA Defense Engine
                 </p>
               </div>
+            </div>
+
+            {/* Logged-in identity + logout */}
+            <div className="hidden lg:flex items-center justify-between px-2 py-2 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div className="text-[11px] font-sans">
+                <p className="text-slate-300 font-mono font-bold">{authSubject}</p>
+                <p className="text-slate-500">{authRole}</p>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="text-[10px] font-bold text-slate-400 hover:text-rose-400 uppercase tracking-wide"
+              >
+                Logout
+              </button>
             </div>
 
             {/* Sidebar Navigation Tabs (Active View Switcher) */}
@@ -936,8 +1043,8 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* 🛡️ Human-in-the-Loop Admin Ban Approval Box */}
-                      {riskData?.is_pending_ban && (
+                      {/* 🛡️ Human-in-the-Loop Admin Ban Approval Box (security_admin role only) */}
+                      {riskData?.is_pending_ban && isAdmin && (
                         <div className="mb-4 p-5 bg-amber-950/80 border border-amber-600/80 rounded-2xl shadow-xl animate-in fade-in text-left">
                           <div className="flex items-center gap-2 text-amber-300 font-bold text-xs uppercase tracking-wider mb-2 font-display">
                             <AlertTriangle className="w-4 h-4 text-amber-400 animate-bounce" />
@@ -947,19 +1054,26 @@ export default function App() {
                             This identity has triggered 3 repeat violations and is quarantined in temporary lockout. Select SecOps action:
                           </p>
                           <div className="flex flex-wrap items-center gap-2.5">
-                            <button 
+                            <button
                               onClick={() => approvePermanentBan(selectedSubject || 'alice')}
                               className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/30 transition-all active:scale-95 flex items-center gap-1.5"
                             >
                               🔴 Approve Permanent Ban
                             </button>
-                            <button 
+                            <button
                               onClick={() => rejectPermanentBan(selectedSubject || 'alice')}
                               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold text-xs rounded-xl transition-all active:scale-95"
                             >
                               ⚪ Dismiss / Forgive (Relax Penalty)
                             </button>
                           </div>
+                        </div>
+                      )}
+                      {riskData?.is_pending_ban && !isAdmin && (
+                        <div className="mb-4 p-5 bg-slate-900/80 border border-slate-700 rounded-2xl text-left">
+                          <p className="text-[11px] text-slate-400 font-sans">
+                            This identity is pending permanent-ban approval. Log in as <span className="font-mono text-slate-300">security_admin</span> to act on it.
+                          </p>
                         </div>
                       )}
 
@@ -1391,7 +1505,7 @@ export default function App() {
                     {/* Node 1: Request */}
                     <div className="flex flex-col items-center">
                       <div className="px-6 py-3 bg-slate-900 border border-slate-700 rounded-2xl font-bold font-mono text-white shadow-md">
-                        HTTP API REQUEST (GET /records/:id with X-Subject)
+                        HTTP API REQUEST (GET /records/:id with Authorization: Bearer JWT)
                       </div>
                       <div className="h-6 w-[2px] bg-slate-700 my-1"></div>
                     </div>

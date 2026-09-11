@@ -1,16 +1,93 @@
 """Minimal FastAPI API with authoritative object authorization and graph telemetry."""
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
-from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from fastapi import FastAPI, Header, HTTPException, Response
-from fastapi.middleware.cors import CORSMiddleware
 
-DB_PATH = Path(__file__).with_name("demo.db")
+import bcrypt
+import jwt
+import numpy as np
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from sklearn.ensemble import IsolationForest
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
+_DB_DIR = Path(os.environ["DB_DIR"]) if os.environ.get("DB_DIR") else Path(__file__).parent
+_DB_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = _DB_DIR / "demo.db"
+AUDIT_DB_PATH = _DB_DIR / "audit.db"
+
+# --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
+APP_ENV = os.environ.get("APP_ENV", "dev")
+DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() != "false"
+JWT_SECRET = os.environ.get("JWT_SECRET", "dev-insecure-secret-change-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_SECONDS = int(os.environ.get("JWT_EXPIRY_SECONDS", "3600"))
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "changeme123")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin_changeme123")
+ADMIN_ROLE = "security_admin"
+
+if APP_ENV == "prod":
+    _insecure_defaults = []
+    if JWT_SECRET.startswith("dev-"):
+        _insecure_defaults.append("JWT_SECRET")
+    if DEMO_PASSWORD == "changeme123":
+        _insecure_defaults.append("DEMO_PASSWORD")
+    if ADMIN_PASSWORD == "admin_changeme123":
+        _insecure_defaults.append("ADMIN_PASSWORD")
+    if _insecure_defaults:
+        raise RuntimeError(
+            f"APP_ENV=prod but dev-only defaults still set for: {', '.join(_insecure_defaults)}. "
+            "Set real values via environment variables before running in production."
+        )
+    if not os.environ.get("FRONTEND_ORIGIN"):
+        raise RuntimeError(
+            "APP_ENV=prod requires FRONTEND_ORIGIN (comma-separated allowed origins) to be set explicitly - "
+            "refusing to boot with an unset CORS policy rather than silently blocking (or wildcarding) all origins."
+        )
+
+
+def build_anomaly_model() -> IsolationForest:
+    """Unsupervised ML layer: flags behavior patterns statistically unlike normal
+    traffic, as a complement to the fixed-threshold heuristics in compute_risk().
+    Trained once at startup on synthetic feature vectors: [unique_denied_short,
+    sequential_steps, unique_denied_long, failure_ratio, endpoints_hit].
+    """
+    rng = np.random.RandomState(42)
+
+    normal = []
+    for _ in range(300):
+        normal.append([
+            rng.choice([0, 0, 0, 1]),          # occasional single denied ID, never habitual
+            0,                                  # no sequential stepping
+            rng.choice([0, 0, 0, 0, 1, 2]),     # a stray denial or two over the long window
+            rng.uniform(0.0, 0.3),               # low failure ratio
+            rng.choice([0, 0, 1]),               # rarely touches a second endpoint
+        ])
+
+    attack = []
+    for _ in range(60):
+        attack.append([
+            rng.randint(4, 12),                 # rapid unique-object pressure
+            rng.randint(2, 6),                   # sequential enumeration
+            rng.randint(15, 40),                 # low-and-slow reconnaissance
+            rng.uniform(0.6, 1.0),               # high failure ratio
+            rng.randint(2, 4),                   # multi-endpoint diversity
+        ])
+
+    training_data = np.array(normal + attack)
+    model = IsolationForest(n_estimators=100, contamination=0.15, random_state=42)
+    model.fit(training_data)
+    return model
+
+
+anomaly_model = build_anomaly_model()
 
 
 @contextmanager
@@ -24,24 +101,24 @@ def db():
         connection.close()
 
 
-def seed_database() -> None:
-    """Resettable, deterministic demo data: users, records, assignments and grants."""
-    with db() as c:
-        c.executescript(
+@contextmanager
+def audit_db():
+    connection = sqlite3.connect(AUDIT_DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        yield connection
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def init_audit_log() -> None:
+    """Append-only forensic log, deliberately kept in its own file so /reset
+    (which wipes the demo dataset) can never wipe incident history with it."""
+    with audit_db() as c:
+        c.execute(
             """
-            DROP TABLE IF EXISTS audit_events;
-            DROP TABLE IF EXISTS access_grants;
-            DROP TABLE IF EXISTS assignments;
-            DROP TABLE IF EXISTS records;
-            DROP TABLE IF EXISTS users;
-            CREATE TABLE users (id TEXT PRIMARY KEY, role TEXT NOT NULL);
-            CREATE TABLE records (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, data TEXT NOT NULL);
-            CREATE TABLE assignments (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
-                                      PRIMARY KEY(subject_id, record_id));
-            CREATE TABLE access_grants (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
-                                        expires_at REAL NOT NULL, reason TEXT NOT NULL, approved_by TEXT NOT NULL,
-                                        PRIMARY KEY(subject_id, record_id));
-            CREATE TABLE audit_events (
+            CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 occurred_at REAL NOT NULL,
                 subject_id TEXT NOT NULL,
@@ -50,23 +127,64 @@ def seed_database() -> None:
                 detector_decision TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 explanation TEXT NOT NULL
-            );
+            )
             """
         )
-        users = [("alice", "customer"), ("bob", "customer"), ("dr_singh", "doctor"),
-                 ("dr_lee", "doctor"), ("dr_cover", "doctor"), ("support_amy", "support"), ("attacker", "customer"),
-                 ("attacker_slow", "customer"), ("security_admin", "security_admin")] + [(f"attacker_{j}", "customer") for j in range(1, 11)] + [(f"sybil_{j}", "customer") for j in range(1, 51)]
-        c.executemany("INSERT INTO users VALUES (?, ?)", users)
+
+
+def seed_database() -> None:
+    """Resettable, deterministic demo data: users, records, assignments, grants,
+    and the persistent (SQLite-backed) behavioral risk engine state. All demo
+    accounts share one password (DEMO_PASSWORD) so the hash only needs computing
+    once per reset instead of once per account."""
+    demo_hash = bcrypt.hashpw(DEMO_PASSWORD.encode(), bcrypt.gensalt()).decode()
+    admin_hash = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
+
+    with db() as c:
+        c.executescript(
+            """
+            DROP TABLE IF EXISTS access_grants;
+            DROP TABLE IF EXISTS assignments;
+            DROP TABLE IF EXISTS records;
+            DROP TABLE IF EXISTS users;
+            DROP TABLE IF EXISTS risk_events;
+            DROP TABLE IF EXISTS risk_strikes;
+            DROP TABLE IF EXISTS risk_blocks;
+            DROP TABLE IF EXISTS risk_bans;
+            CREATE TABLE users (id TEXT PRIMARY KEY, role TEXT NOT NULL, password_hash TEXT NOT NULL);
+            CREATE TABLE records (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE assignments (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
+                                      PRIMARY KEY(subject_id, record_id));
+            CREATE TABLE access_grants (subject_id TEXT NOT NULL, record_id INTEGER NOT NULL,
+                                        expires_at REAL NOT NULL, reason TEXT NOT NULL, approved_by TEXT NOT NULL,
+                                        PRIMARY KEY(subject_id, record_id));
+            CREATE TABLE risk_events (subject TEXT NOT NULL, record_id INTEGER NOT NULL,
+                                      allowed INTEGER NOT NULL, at REAL NOT NULL, endpoint TEXT NOT NULL);
+            CREATE INDEX idx_risk_events_subject ON risk_events(subject, at);
+            CREATE TABLE risk_strikes (subject TEXT NOT NULL, at REAL NOT NULL);
+            CREATE INDEX idx_risk_strikes_subject ON risk_strikes(subject, at);
+            CREATE TABLE risk_blocks (subject TEXT PRIMARY KEY, blocked_until REAL NOT NULL);
+            CREATE TABLE risk_bans (subject TEXT PRIMARY KEY, status TEXT NOT NULL);
+            """
+        )
+        users = ([("alice", "customer", demo_hash), ("bob", "customer", demo_hash),
+                  ("dr_singh", "doctor", demo_hash), ("dr_lee", "doctor", demo_hash),
+                  ("dr_cover", "doctor", demo_hash), ("support_amy", "support", demo_hash),
+                  ("attacker", "customer", demo_hash), ("attacker_slow", "customer", demo_hash),
+                  (ADMIN_ROLE, ADMIN_ROLE, admin_hash)]
+                 + [(f"attacker_{j}", "customer", demo_hash) for j in range(1, 11)]
+                 + [(f"sybil_{j}", "customer", demo_hash) for j in range(1, 51)])
+        c.executemany("INSERT INTO users VALUES (?, ?, ?)", users)
         records = [(i, "alice" if i <= 50 else "bob", f"confidential record {i}") for i in range(1, 101)]
         c.executemany("INSERT INTO records VALUES (?, ?, ?)", records)
         c.executemany("INSERT INTO assignments VALUES (?, ?)", [("dr_singh", i) for i in range(1, 26)])
         c.executemany("INSERT INTO assignments VALUES (?, ?)", [("dr_lee", i) for i in range(26, 51)])
         # A time-bound delegated/shared record: this must look legitimate to the detector.
         c.execute("INSERT INTO access_grants VALUES (?, ?, ?, ?, ?)",
-                  ("support_amy", 17, time.time() + 3600, "ticket-8431", "security_admin"))
+                  ("support_amy", 17, time.time() + 3600, "ticket-8431", ADMIN_ROLE))
         c.executemany("INSERT INTO access_grants VALUES (?, ?, ?, ?, ?)", [
-            ("dr_cover", 8, time.time() + 1800, "shift-cover-ward-a", "security_admin"),
-            ("dr_cover", 31, time.time() + 1800, "shift-cover-ward-b", "security_admin"),
+            ("dr_cover", 8, time.time() + 1800, "shift-cover-ward-a", ADMIN_ROLE),
+            ("dr_cover", 31, time.time() + 1800, "shift-cover-ward-b", ADMIN_ROLE),
         ])
 
 
@@ -100,7 +218,7 @@ def authorization_context(subject: str, record_id: int) -> dict:
 
 
 def record_audit(subject: str, record_id: int, authorization: str | None, decision: str, outcome: str, explanations: list[str]) -> None:
-    with db() as c:
+    with audit_db() as c:
         c.execute("INSERT INTO audit_events (occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation) VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (time.time(), subject, record_id, authorization, decision, outcome, " | ".join(explanations)))
 
@@ -114,97 +232,159 @@ class Event:
 
 
 class BehavioralRiskEngine:
-    def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0, rapid_threshold: int = 4, slow_threshold: int = 15):
+    """Sliding-window behavioral detector. All mutable state (events, strikes,
+    blocks, pending/approved bans) lives in SQLite (risk_* tables in demo.db),
+    not in Python-process memory: it survives a server restart and is shared
+    by any process pointed at the same demo.db file."""
+
+    def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0,
+                 rapid_threshold: int = 4, slow_threshold: int = 15):
         self.short_window = short_window
         self.long_window = long_window
         self.block_duration = block_duration
         self.rapid_threshold = rapid_threshold
         self.slow_threshold = slow_threshold
-        self.history: dict[str, deque[Event]] = defaultdict(deque)
-        self.blocked_until: dict[str, float] = {}
-        self.strikes: dict[str, list[float]] = defaultdict(list)
-        self.pending_permanent_bans: set[str] = set()
-        self.approved_permanent_bans: set[str] = set()
-        self.global_record_tracker: dict[int, set[str]] = defaultdict(set)
+
+    def record_event(self, subject: str, record_id: int, allowed: bool, at: float | None = None, endpoint: str = "records") -> None:
+        at = at if at is not None else time.time()
+        with db() as c:
+            c.execute("INSERT INTO risk_events (subject, record_id, allowed, at, endpoint) VALUES (?, ?, ?, ?, ?)",
+                      (subject, record_id, int(allowed), at, endpoint))
+
+    def _events(self, subject: str, now: float) -> list[Event]:
+        cutoff = now - self.long_window
+        with db() as c:
+            rows = c.execute(
+                "SELECT record_id, allowed, at, endpoint FROM risk_events WHERE subject = ? AND at > ? ORDER BY at ASC",
+                (subject, cutoff)).fetchall()
+        return [Event(r["record_id"], bool(r["allowed"]), r["at"], r["endpoint"]) for r in rows]
 
     def get_strike_count(self, subject: str, now: float | None = None) -> int:
         now = now or time.time()
-        valid_strikes = [t for t in self.strikes[subject] if now - t <= self.long_window]
-        self.strikes[subject] = valid_strikes
-        return len(valid_strikes)
+        cutoff = now - self.long_window
+        with db() as c:
+            c.execute("DELETE FROM risk_strikes WHERE subject = ? AND at <= ?", (subject, cutoff))
+            row = c.execute("SELECT COUNT(*) AS n FROM risk_strikes WHERE subject = ? AND at > ?", (subject, cutoff)).fetchone()
+        return row["n"]
+
+    def _ban_status(self, subject: str) -> str | None:
+        with db() as c:
+            row = c.execute("SELECT status FROM risk_bans WHERE subject = ?", (subject,)).fetchone()
+        return row["status"] if row else None
+
+    def _set_ban_status(self, subject: str, status: str) -> None:
+        with db() as c:
+            c.execute(
+                "INSERT INTO risk_bans (subject, status) VALUES (?, ?) "
+                "ON CONFLICT(subject) DO UPDATE SET status = excluded.status",
+                (subject, status))
+
+    def _clear_ban_status(self, subject: str) -> None:
+        with db() as c:
+            c.execute("DELETE FROM risk_bans WHERE subject = ?", (subject,))
+
+    def _set_blocked_until(self, subject: str, until: float) -> None:
+        with db() as c:
+            c.execute(
+                "INSERT INTO risk_blocks (subject, blocked_until) VALUES (?, ?) "
+                "ON CONFLICT(subject) DO UPDATE SET blocked_until = excluded.blocked_until",
+                (subject, until))
+
+    def blocked_until(self, subject: str) -> float:
+        with db() as c:
+            row = c.execute("SELECT blocked_until FROM risk_blocks WHERE subject = ?", (subject,)).fetchone()
+        return row["blocked_until"] if row else 0.0
 
     def register_strike_and_block(self, subject: str, now: float) -> tuple[float, str, int]:
         """Registers a new strike within the 1-hour window and escalates the penalty."""
-        self.get_strike_count(subject, now)
-        self.strikes[subject].append(now)
-        count = len(self.strikes[subject])
-        
+        with db() as c:
+            c.execute("INSERT INTO risk_strikes (subject, at) VALUES (?, ?)", (subject, now))
+        count = self.get_strike_count(subject, now)
+
         if count == 1:
-            lockout = 120.0 # Strike 1: 2-Minute Soft Lockout
-            signal = "strike_1_soft_lockout_2m"
+            lockout, signal = 120.0, "strike_1_soft_lockout_2m"  # Strike 1: 2-Minute Soft Lockout
         elif count == 2:
-            lockout = 1800.0 # Strike 2: 30-Minute Hard Lockout
-            signal = "strike_2_hard_lockout_30m"
+            lockout, signal = 1800.0, "strike_2_hard_lockout_30m"  # Strike 2: 30-Minute Hard Lockout
+        elif self._ban_status(subject) == "approved":
+            lockout, signal = 315360000.0, "strike_3_permanent_ban_approved"  # Permanent Ban (10 years)
         else:
-            if subject in self.approved_permanent_bans:
-                lockout = 315360000.0 # Permanent Ban (10 years)
-                signal = "strike_3_permanent_ban_approved"
-            else:
-                # 🚨 Strike 3 requires Admin Approval: Place in temporary holding quarantine (30m) pending admin review
-                self.pending_permanent_bans.add(subject)
-                lockout = 1800.0
-                signal = "strike_3_pending_admin_approval"
-            
-        self.blocked_until[subject] = now + lockout
+            # Strike 3 requires Admin Approval: place in temporary holding quarantine (30m) pending admin review
+            self._set_ban_status(subject, "pending")
+            lockout, signal = 1800.0, "strike_3_pending_admin_approval"
+
+        self._set_blocked_until(subject, now + lockout)
         return lockout, signal, count
 
     def approve_permanent_ban(self, subject: str, now: float | None = None) -> bool:
         now = now or time.time()
-        self.pending_permanent_bans.discard(subject)
-        self.approved_permanent_bans.add(subject)
-        self.blocked_until[subject] = now + 315360000.0
+        self._set_ban_status(subject, "approved")
+        self._set_blocked_until(subject, now + 315360000.0)
         return True
 
     def reject_permanent_ban(self, subject: str, now: float | None = None) -> bool:
         now = now or time.time()
-        self.pending_permanent_bans.discard(subject)
-        self.approved_permanent_bans.discard(subject)
-        if self.strikes[subject]:
-            self.strikes[subject].pop()
-        self.blocked_until[subject] = now + 60.0
+        self._clear_ban_status(subject)
+        with db() as c:
+            row = c.execute("SELECT rowid FROM risk_strikes WHERE subject = ? ORDER BY at DESC LIMIT 1", (subject,)).fetchone()
+            if row:
+                c.execute("DELETE FROM risk_strikes WHERE rowid = ?", (row["rowid"],))
+        self._set_blocked_until(subject, now + 60.0)
         return True
+
+    def pending_bans(self) -> list[str]:
+        with db() as c:
+            rows = c.execute("SELECT subject FROM risk_bans WHERE status = 'pending'").fetchall()
+        return [r["subject"] for r in rows]
+
+    def approved_bans(self) -> list[str]:
+        with db() as c:
+            rows = c.execute("SELECT subject FROM risk_bans WHERE status = 'approved'").fetchall()
+        return [r["subject"] for r in rows]
 
     def cleanup_stale(self) -> None:
         now = time.time()
-        stale_subjects = []
-        for subject, q in self.history.items():
-            if not q or now - q[-1].at > self.long_window:
-                stale_subjects.append(subject)
-        for subject in stale_subjects:
-            del self.history[subject]
-            if subject in self.blocked_until and self.blocked_until[subject] < now:
-                del self.blocked_until[subject]
+        cutoff = now - self.long_window
+        with db() as c:
+            c.execute("DELETE FROM risk_events WHERE at <= ?", (cutoff,))
+            c.execute("DELETE FROM risk_strikes WHERE at <= ?", (cutoff,))
+            c.execute("DELETE FROM risk_blocks WHERE blocked_until < ?", (now,))
 
     def reset(self) -> None:
-        self.history.clear()
-        self.blocked_until.clear()
-        self.strikes.clear()
-        self.pending_permanent_bans.clear()
-        self.approved_permanent_bans.clear()
-        self.global_record_tracker.clear()
+        with db() as c:
+            c.execute("DELETE FROM risk_events")
+            c.execute("DELETE FROM risk_strikes")
+            c.execute("DELETE FROM risk_blocks")
+            c.execute("DELETE FROM risk_bans")
+
+    def active_subject_count(self) -> int:
+        now = time.time()
+        with db() as c:
+            row = c.execute("SELECT COUNT(DISTINCT subject) AS n FROM risk_events WHERE at > ?",
+                             (now - self.long_window,)).fetchone()
+        return row["n"]
+
+    def blocked_subject_count(self) -> int:
+        now = time.time()
+        with db() as c:
+            row = c.execute("SELECT COUNT(*) AS n FROM risk_blocks WHERE blocked_until > ?", (now,)).fetchone()
+        return row["n"]
+
+    def coordinated_attacks(self, threshold: int = 50) -> dict:
+        with db() as c:
+            rows = c.execute(
+                "SELECT record_id, COUNT(DISTINCT subject) AS n FROM risk_events WHERE allowed = 0 "
+                "GROUP BY record_id HAVING n >= ?", (threshold,)).fetchall()
+        return {r["record_id"]: r["n"] for r in rows}
 
     def evaluate(self, subject: str, record_id: int, allowed: bool, endpoint: str = "records") -> tuple[str, list[str], bool, int, str]:
         now = time.time()
-        
-        if not allowed:
-            self.global_record_tracker[record_id].add(subject)
-            
-        # Check if currently blocked
-        if self.blocked_until.get(subject, 0) > now:
+
+        if self.blocked_until(subject) > now:
             strike_count = self.get_strike_count(subject, now)
-            if subject in self.approved_permanent_bans:
+            status = self._ban_status(subject)
+            if status == "approved":
                 sig = "strike_3_permanent_ban_approved"
-            elif subject in self.pending_permanent_bans or strike_count >= 3:
+            elif status == "pending" or strike_count >= 3:
                 sig = "strike_3_pending_admin_approval"
             elif strike_count == 2:
                 sig = "strike_2_hard_lockout_30m"
@@ -212,60 +392,55 @@ class BehavioralRiskEngine:
                 sig = "strike_1_soft_lockout_2m"
             return "block", ["temporarily_blocked", sig], False, 100, "Attack"
 
-        # prune long history
-        q = self.history[subject]
-        while q and now - q[0].at > self.long_window:
-            q.popleft()
-            
-        q.append(Event(record_id, allowed, now, endpoint))
-        
+        self.record_event(subject, record_id, allowed, now, endpoint)
+
         score_data = self.compute_risk(subject, now)
         score, signals, category = score_data["score"], score_data["signals"], score_data["category"]
-        
-        unseen = False # Kept for compatibility if necessary
+
+        unseen = False  # Kept for compatibility if necessary
         decision = "allow" if allowed else "deny"
         if score >= 90:
             decision = "block"
             lockout, strike_sig, count = self.register_strike_and_block(subject, now)
             signals.append("blocked_due_to_high_risk")
             signals.append(strike_sig)
-            
+
         return decision, signals, unseen, score, category
 
     def compute_risk(self, subject: str, now: float) -> dict:
-        q = self.history[subject]
-        
+        q = self._events(subject, now)
+
         denied_all = [e for e in q if not e.allowed]
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
-        
+
         unique_denied_short = len({e.record_id for e in denied_short if e.endpoint == "records"})
         unique_denied_long = len({e.record_id for e in denied_all if e.endpoint == "records"})
-        
+
         total_long = len(q)
         failed_long = len(denied_all)
-        
+
         signals = []
         contributions = {}
-        
+
         if unique_denied_short >= self.rapid_threshold:
             contributions["unauthorized_unique_object_pressure"] = 45
             signals.append("unauthorized_unique_object_pressure")
         elif unique_denied_short > 0:
             contributions["unique_denied_short"] = unique_denied_short * 10
-            
+
         # Sequential short
         short_ids = [e.record_id for e in q if (not e.allowed) and (now - e.at <= self.short_window) and e.endpoint == "records"]
         sequential_steps = sum(1 for a, b in zip(short_ids, short_ids[1:]) if abs(b - a) == 1)
         if sequential_steps >= 2:
             contributions["sequential_id_enumeration"] = 35
             signals.append("sequential_id_enumeration")
-            
+
         if unique_denied_long >= self.slow_threshold:
             contributions["low_and_slow_reconnaissance"] = 50
             signals.append("low_and_slow_reconnaissance")
         elif unique_denied_long > 0:
             contributions["unique_denied_long"] = unique_denied_long * 2
-            
+
         if total_long > 0:
             ratio = failed_long / total_long
             if ratio > 0.5 and failed_long > 5:
@@ -276,18 +451,32 @@ class BehavioralRiskEngine:
         if endpoints_hit >= 2:
             contributions["endpoint_diversity"] = 20
             signals.append("endpoint_diversity")
-                
+
+        if failed_long > 0:
+            failure_ratio = failed_long / total_long if total_long > 0 else 0.0
+            feature_vector = np.array([[unique_denied_short, sequential_steps, unique_denied_long,
+                                         failure_ratio, endpoints_hit]])
+            if anomaly_model.predict(feature_vector)[0] == -1:
+                contributions["ml_behavioral_anomaly"] = 15
+                signals.append("ml_behavioral_anomaly")
+
         score = min(100, sum(contributions.values()))
-        
-        if self.blocked_until.get(subject, 0) > now:
+
+        if self.blocked_until(subject) > now:
+            # Forcing score to 100 while blocked must not desync it from
+            # `sum(contributions)` - callers (dashboard, benchmark checks)
+            # rely on that invariant. Fold the gap into an explicit entry
+            # instead of leaving contributions under-reporting the score.
+            contributions["blocked_override"] = 100 - sum(contributions.values())
             score = 100
             if "temporarily_blocked" not in signals:
                 signals.append("temporarily_blocked")
             strike_count = self.get_strike_count(subject, now)
-            if subject in self.approved_permanent_bans:
+            status = self._ban_status(subject)
+            if status == "approved":
                 if "strike_3_permanent_ban_approved" not in signals:
                     signals.append("strike_3_permanent_ban_approved")
-            elif subject in self.pending_permanent_bans or strike_count >= 3:
+            elif status == "pending" or strike_count >= 3:
                 if "strike_3_pending_admin_approval" not in signals:
                     signals.append("strike_3_pending_admin_approval")
             elif strike_count == 2 and "strike_2_hard_lockout_30m" not in signals:
@@ -303,13 +492,79 @@ class BehavioralRiskEngine:
             category = "High Risk"
         else:
             category = "Attack"
-            
+
         return {"score": score, "signals": signals, "category": category, "contributions": contributions}
 
 
 engine = BehavioralRiskEngine()
 app = FastAPI(title="BOLA Graph Benchmark")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+_frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").split(",") if o.strip()]
+_cors_origins = _frontend_origins if _frontend_origins else (["*"] if APP_ENV != "prod" else [])
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "env": APP_ENV, "demo_mode": DEMO_MODE}
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Rate-limit per authenticated identity when a bearer token is present
+    (so one attacker can't dodge the limit by spraying requests from many IPs
+    behind a NAT), falling back to client IP for unauthenticated calls."""
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+            return f"subject:{payload.get('sub', 'unknown')}"
+        except jwt.InvalidTokenError:
+            pass
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def create_access_token(subject: str, role: str) -> str:
+    now = time.time()
+    payload = {"sub": subject, "role": role, "iat": now, "exp": now + JWT_EXPIRY_SECONDS}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def get_current_identity(authorization: str | None = Header(default=None)) -> tuple[str, str]:
+    """Real authentication: a signed, time-bound JWT bearer token, verified
+    server-side. Replaces the old design where the client-supplied X-Subject
+    header was trusted as-is."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "Missing or malformed Authorization header (expected 'Bearer <token>')")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expired, please log in again")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid authentication token")
+    return payload["sub"], payload.get("role", "customer")
+
+
+def require_security_admin(role: str) -> None:
+    if role != ADMIN_ROLE:
+        raise HTTPException(403, f"This action requires the {ADMIN_ROLE} role")
+
+
+def guard_demo_endpoint(authorization: str | None = Header(default=None)) -> None:
+    """/reset and /simulate/* are open by design in DEMO_MODE (so the dashboard's
+    Reset/Simulator buttons work without login). Outside DEMO_MODE, require a
+    security_admin bearer token instead."""
+    if DEMO_MODE:
+        return
+    subject, role = get_current_identity(authorization)
+    require_security_admin(role)
+
 
 def explain_detector_signals(signals: list[str]) -> list[str]:
     messages = {
@@ -323,13 +578,48 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "strike_1_soft_lockout_2m": "Strike 1/3: 2-Minute Soft Lockout penalty enforced.",
         "strike_2_hard_lockout_30m": "Strike 2/3: Repeat violation within 1 hour. 30-Minute Hard Lockout penalty enforced.",
         "strike_3_pending_admin_approval": "Strike 3/3 Reached: Permanent Ban PENDING ADMIN APPROVAL (Quarantined).",
-        "strike_3_permanent_ban_approved": "Strike 3/3: Permanent Firewall Blacklist APPROVED by Administrator."
+        "strike_3_permanent_ban_approved": "Strike 3/3: Permanent Firewall Blacklist APPROVED by Administrator.",
+        "ml_behavioral_anomaly": "An unsupervised ML model (Isolation Forest) flagged this access pattern as statistically abnormal compared to normal traffic."
     }
     return [messages[s] for s in signals if s in messages]
 
 
+@app.post("/auth/register")
+@limiter.limit("1000/minute")
+def register(request: Request, payload: dict) -> dict:
+    subject = payload.get("subject")
+    password = payload.get("password")
+    role = payload.get("role", "customer")
+    if not subject or not password:
+        raise HTTPException(400, "subject and password are required")
+    if role == ADMIN_ROLE:
+        raise HTTPException(400, f"Cannot self-register with the {ADMIN_ROLE} role")
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    with db() as c:
+        if c.execute("SELECT 1 FROM users WHERE id = ?", (subject,)).fetchone():
+            raise HTTPException(409, "Subject already registered")
+        c.execute("INSERT INTO users (id, role, password_hash) VALUES (?, ?, ?)", (subject, role, password_hash))
+    return {"status": "registered", "subject": subject, "role": role}
+
+
+@app.post("/auth/login")
+@limiter.limit("1000/minute")
+def login(request: Request, payload: dict) -> dict:
+    subject = payload.get("subject")
+    password = payload.get("password")
+    if not subject or not password:
+        raise HTTPException(400, "subject and password are required")
+    with db() as c:
+        row = c.execute("SELECT role, password_hash FROM users WHERE id = ?", (subject,)).fetchone()
+    if not row or not bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
+        raise HTTPException(401, "Invalid subject or password")
+    token = create_access_token(subject, row["role"])
+    return {"access_token": token, "token_type": "bearer", "subject": subject, "role": row["role"], "expires_in": JWT_EXPIRY_SECONDS}
+
+
 @app.post("/reset")
-def reset() -> dict:
+@limiter.limit("60/minute")
+def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     seed_database()
     engine.reset()
     return {"status": "reset"}
@@ -337,12 +627,13 @@ def reset() -> dict:
 
 soc_alerts: list[dict] = []
 
+
 def dispatch_soc_alert(subject: str, record_id: int, score: int, category: str, signals: list[str]) -> dict:
     """Dispatches a structured forensic payload to SIEM/SOC and appends to in-memory audit queue."""
     strikes = max(1, engine.get_strike_count(subject))
     tier = "PERMANENT_BLACKLIST" if strikes >= 3 else ("HARD_LOCKOUT_30M" if strikes == 2 else "SOFT_LOCKOUT_2M")
     mitigation = "PERMANENT_IDENTITY_BLACKLIST (Strike 3/3)" if strikes >= 3 else ("AUTOMATIC_IDENTITY_LOCKOUT_30M (Strike 2/3)" if strikes == 2 else "AUTOMATIC_IDENTITY_LOCKOUT_120S (Strike 1/3)")
-    
+
     alert_payload = {
         "alert_id": f"SOC-ALERT-{int(time.time() * 1000)}",
         "timestamp": time.time(),
@@ -361,35 +652,29 @@ def dispatch_soc_alert(subject: str, record_id: int, score: int, category: str, 
     soc_alerts.insert(0, alert_payload)
     if len(soc_alerts) > 50:
         soc_alerts.pop()
-        
+
     return alert_payload
 
 
 @app.get("/records/{record_id}")
-def get_record(record_id: int, response: Response,
-               x_subject: str | None = Header(default=None)) -> dict:
-    subject = x_subject
-    if not subject:
-        raise HTTPException(401, "Missing X-Subject")
-    with db() as c:
-        if not c.execute("SELECT 1 FROM users WHERE id = ?", (subject,)).fetchone():
-            # Auto-register new users for the demo so any name works
-            c.execute("INSERT INTO users VALUES (?, 'customer')", (subject,))
-            c.commit()
-    
+@limiter.limit("1000/minute")
+def get_record(record_id: int, request: Request, response: Response,
+               identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role = identity
+
     access = authorization_context(subject, record_id)
     authorization = access["authorization"]
-    
+
     decision, signals, unseen, score, category = engine.evaluate(subject, record_id, authorization is not None)
     detector_explanations = explain_detector_signals(signals)
     explanations = access["explanations"] + detector_explanations
-    
+
     response.headers["X-Detector-Decision"] = decision
     response.headers["X-Detector-Signals"] = ",".join(signals)
     response.headers["X-Graph-Unseen"] = str(unseen).lower()
     response.headers["X-Risk-Score"] = str(score)
     response.headers["X-Risk-Category"] = category
-    
+
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
         record_audit(subject, record_id, authorization, decision, "blocked", explanations)
@@ -414,80 +699,91 @@ def get_record(record_id: int, response: Response,
 
 
 @app.get("/audit-events")
-def get_audit_events(x_subject: str | None = Header(default=None)) -> dict:
-    if x_subject != "security_admin":
-        raise HTTPException(403, "Audit access requires the security_admin subject")
-    with db() as c:
+def get_audit_events(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
+    _subject, role = identity
+    require_security_admin(role)
+    with audit_db() as c:
         rows = c.execute("SELECT id, occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation FROM audit_events ORDER BY id DESC LIMIT 100").fetchall()
     return {"events": [dict(row) for row in rows]}
 
 
+def _login_headers(client, subject: str, password: str = DEMO_PASSWORD) -> dict:
+    res = client.post("/auth/login", json={"subject": subject, "password": password})
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 @app.post("/simulate/normal")
-def simulate_normal() -> dict:
+@limiter.limit("5/minute")
+def simulate_normal(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     from fastapi.testclient import TestClient
     client = TestClient(app)
+    headers = _login_headers(client, "alice")
     results = []
     # Alice requests her own records 1 to 50
     for i in range(1, 51):
-        res = client.get(f"/records/{i}", headers={"X-Subject": "alice"})
+        res = client.get(f"/records/{i}", headers=headers)
         results.append(res.status_code)
     return {"status": "normal_simulated", "requests": 50, "results": results}
 
 @app.post("/simulate/rapid")
-def simulate_rapid() -> dict:
+@limiter.limit("5/minute")
+def simulate_rapid(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     from fastapi.testclient import TestClient
     client = TestClient(app)
+    headers = _login_headers(client, "attacker_1")
     results = []
     # Attacker rapidly asks for ids 51 to 55
     for i in range(51, 56):
-        res = client.get(f"/records/{i}", headers={"X-Subject": "attacker_1"})
+        res = client.get(f"/records/{i}", headers=headers)
         results.append({"id": i, "status": res.status_code, "risk": res.headers.get("X-Risk-Score"), "category": res.headers.get("X-Risk-Category")})
     return {"status": "rapid_simulated", "results": results}
 
 @app.post("/simulate/low_and_slow")
-def simulate_low_and_slow() -> dict:
+@limiter.limit("5/minute")
+def simulate_low_and_slow(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     from fastapi.testclient import TestClient
-    import time
     client = TestClient(app)
     results = []
-    
+
     subject = "attacker_slow"
     now = time.time()
-    
+
     # Generate 15 failed requests spaced over the hour
     for i in range(15):
         event_time = now - (3600) + (i * 240)
-        engine.history[subject].append(Event(50+i, False, event_time))
-        record_audit(subject, 50+i, None, "deny", "denied", ["Simulated low and slow deny"])
-        
-    res = client.get(f"/records/66", headers={"X-Subject": subject})
+        engine.record_event(subject, 50 + i, False, event_time)
+        record_audit(subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"])
+
+    headers = _login_headers(client, subject)
+    res = client.get("/records/66", headers=headers)
     results.append({"status": res.status_code, "risk": res.headers.get("X-Risk-Score"), "category": res.headers.get("X-Risk-Category")})
     return {"status": "low_and_slow_simulated", "results": results}
 
 @app.post("/simulate/coordinated")
-def simulate_coordinated() -> dict:
+@limiter.limit("5/minute")
+def simulate_coordinated(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
     from fastapi.testclient import TestClient
     client = TestClient(app)
     # Simulate 50 sybils hitting record 1
     for i in range(1, 51):
-        client.get("/records/1", headers={"X-Subject": f"sybil_{i}"})
+        headers = _login_headers(client, f"sybil_{i}")
+        client.get("/records/1", headers=headers)
     return {"status": "coordinated_simulated"}
 
 
 @app.get("/users/{user_id}")
-def get_user(user_id: int, response: Response, x_subject: str | None = Header(default=None)) -> dict:
-    if not x_subject:
-        raise HTTPException(401, "Missing X-Subject")
-    decision, signals, unseen, score, category = engine.evaluate(x_subject, user_id, False, endpoint="users")
+def get_user(user_id: int, response: Response, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role = identity
+    decision, signals, unseen, score, category = engine.evaluate(subject, user_id, False, endpoint="users")
     if decision == "block":
         raise HTTPException(403, detail={"outcome": "blocked", "score": score, "category": category})
     raise HTTPException(403, detail={"outcome": "denied", "score": score, "category": category})
 
 @app.get("/invoices/{invoice_id}")
-def get_invoice(invoice_id: int, response: Response, x_subject: str | None = Header(default=None)) -> dict:
-    if not x_subject:
-        raise HTTPException(401, "Missing X-Subject")
-    decision, signals, unseen, score, category = engine.evaluate(x_subject, invoice_id, False, endpoint="invoices")
+def get_invoice(invoice_id: int, response: Response, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
+    subject, _role = identity
+    decision, signals, unseen, score, category = engine.evaluate(subject, invoice_id, False, endpoint="invoices")
     if decision == "block":
         raise HTTPException(403, detail={"outcome": "blocked", "score": score, "category": category})
     raise HTTPException(403, detail={"outcome": "denied", "score": score, "category": category})
@@ -501,22 +797,24 @@ def get_config() -> dict:
         "slow_threshold": engine.slow_threshold,
         "strike_1_duration": "2m (Soft)",
         "strike_2_duration": "30m (Hard)",
-        "strike_3_duration": "Permanent (Blacklist)"
+        "strike_3_duration": "Permanent (Blacklist)",
+        "ai_anomaly_detection": "IsolationForest (scikit-learn)",
+        "auth": "JWT bearer tokens (HS256)",
+        "state_backend": "SQLite (persistent, shared across processes via demo.db)"
     }
 
 @app.get("/stats")
 def get_stats() -> dict:
     engine.cleanup_stale()
-    blocked = len([k for k, v in engine.blocked_until.items() if v > time.time()])
-    coordinated = {record_id: len(subjects) for record_id, subjects in engine.global_record_tracker.items() if len(subjects) >= 50}
-    return {"active_subjects": len(engine.history), "blocked_subjects": blocked, "coordinated_attacks": coordinated}
+    return {"active_subjects": engine.active_subject_count(), "blocked_subjects": engine.blocked_subject_count(),
+            "coordinated_attacks": engine.coordinated_attacks()}
 
 @app.get("/events")
-def get_events(x_subject: str | None = Header(default=None)) -> dict:
+def get_events(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     # Same audit data as /audit-events (kept for backward compatibility); must carry the same gate.
-    if x_subject != "security_admin":
-        raise HTTPException(403, "Audit access requires the security_admin subject")
-    with db() as c:
+    _subject, role = identity
+    require_security_admin(role)
+    with audit_db() as c:
         rows = c.execute("SELECT id, occurred_at, subject_id, record_id, authorization, detector_decision, outcome, explanation FROM audit_events ORDER BY id DESC LIMIT 50").fetchall()
     return {"events": [dict(row) for row in rows]}
 
@@ -525,10 +823,12 @@ def get_risk(subject: str) -> dict:
     now = time.time()
     res = engine.compute_risk(subject, now)
     strikes = engine.get_strike_count(subject, now)
-    is_blocked = engine.blocked_until.get(subject, 0) > now
-    remaining = int(engine.blocked_until[subject] - now) if is_blocked else 0
-    is_pending = subject in engine.pending_permanent_bans or (strikes >= 3 and subject not in engine.approved_permanent_bans and is_blocked)
-    is_approved = subject in engine.approved_permanent_bans or (is_blocked and remaining > 86400 * 30)
+    blocked_until = engine.blocked_until(subject)
+    is_blocked = blocked_until > now
+    remaining = int(blocked_until - now) if is_blocked else 0
+    status = engine._ban_status(subject)
+    is_pending = status == "pending" or (strikes >= 3 and status != "approved" and is_blocked)
+    is_approved = status == "approved" or (is_blocked and remaining > 86400 * 30)
     return {
         "subject": subject,
         "score": res["score"],
@@ -545,33 +845,38 @@ def get_risk(subject: str) -> dict:
 
 
 @app.post("/admin/approve-ban/{subject}")
-def approve_permanent_ban_endpoint(subject: str) -> dict:
+def approve_permanent_ban_endpoint(subject: str, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     """Admin approves permanent firewall ban for Strike 3 offender."""
+    caller, role = identity
+    require_security_admin(role)
     engine.approve_permanent_ban(subject)
-    record_audit(subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin APPROVED Permanent Firewall Ban for '{subject}'"])
+    record_audit(subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin '{caller}' APPROVED Permanent Firewall Ban for '{subject}'"])
     return {"status": "permanent_ban_approved", "subject": subject, "is_permanent": True}
 
 
 @app.post("/admin/reject-ban/{subject}")
-def reject_permanent_ban_endpoint(subject: str) -> dict:
+def reject_permanent_ban_endpoint(subject: str, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     """Admin dismisses permanent ban and relaxes penalty for false-positive or pentester."""
+    caller, role = identity
+    require_security_admin(role)
     engine.reject_permanent_ban(subject)
-    record_audit(subject, 0, "ADMIN_AUTHORITY", "allow", "allowed", [f"Admin DISMISSED Permanent Ban for '{subject}' (Quarantine Relaxed)"])
+    record_audit(subject, 0, "ADMIN_AUTHORITY", "allow", "allowed", [f"Admin '{caller}' DISMISSED Permanent Ban for '{subject}' (Quarantine Relaxed)"])
     return {"status": "ban_dismissed", "subject": subject, "is_permanent": False}
 
 
 @app.get("/admin/pending-bans")
-def get_pending_bans() -> dict:
+def get_pending_bans(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     """Returns all subjects currently awaiting administrative ban approval."""
-    return {
-        "pending_bans": list(engine.pending_permanent_bans),
-        "approved_bans": list(engine.approved_permanent_bans)
-    }
+    _subject, role = identity
+    require_security_admin(role)
+    return {"pending_bans": engine.pending_bans(), "approved_bans": engine.approved_bans()}
 
 
 @app.get("/soc/alerts")
-def get_soc_alerts() -> dict:
+def get_soc_alerts(identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     """Returns real-time forensic alerts dispatched to the SOC / SIEM."""
+    _subject, role = identity
+    require_security_admin(role)
     return {
         "total_alerts": len(soc_alerts),
         "recent_alerts": soc_alerts[:20]
@@ -579,8 +884,10 @@ def get_soc_alerts() -> dict:
 
 
 @app.post("/soc/test-webhook")
-def test_soc_webhook(payload: dict | None = None) -> dict:
+def test_soc_webhook(payload: dict | None = None, identity: tuple[str, str] = Depends(get_current_identity)) -> dict:
     """Trigger or receive external SOC alert webhook and log to audit events."""
+    _subject, role = identity
+    require_security_admin(role)
     if not payload:
         payload = dispatch_soc_alert(
             subject="simulated_adversary",
@@ -596,10 +903,10 @@ def test_soc_webhook(payload: dict | None = None) -> dict:
         signals = payload.get("signals_tripped", ["bola_attempt"])
         decision = payload.get("decision", "deny")
         outcome = "blocked" if decision == "block" else "denied"
-        explanation = f"Django BOLA Activity: {','.join(signals)}" if outcome == "blocked" else f"Django Object Denied: Attempted {target_id}"
-        
+        explanation = f"External BOLA Activity: {','.join(signals)}" if outcome == "blocked" else f"External Object Denied: Attempted {target_id}"
+
         # Feed into behavioral risk engine so /risk/{subject} and /stats reflect it
-        engine.history[subject].append(Event(target_id, False, time.time(), "records"))
+        engine.record_event(subject, target_id, False, time.time(), "records")
         if decision == "block":
             lockout, strike_sig, count = engine.register_strike_and_block(subject, time.time())
             if strike_sig not in signals:
@@ -607,9 +914,24 @@ def test_soc_webhook(payload: dict | None = None) -> dict:
             score = payload.get("risk_score", 100)
             category = payload.get("risk_category", "Attack")
             dispatch_soc_alert(subject, target_id, score, category, signals)
-            
+
         record_audit(subject, target_id, None, decision, outcome, [explanation])
     return {"status": "alert_logged_and_synced", "payload": payload}
 
 
-seed_database()
+def ensure_database() -> None:
+    """Bootstrap demo.db on first run only. A bare `seed_database()` call here
+    would wipe the persistent risk-engine state (and demo accounts) on every
+    server restart, defeating the point of moving that state into SQLite."""
+    if not DB_PATH.exists():
+        seed_database()
+        return
+    with db() as c:
+        try:
+            c.execute("SELECT password_hash FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            seed_database()  # stale schema from before auth support was added
+
+
+init_audit_log()
+ensure_database()

@@ -21,15 +21,26 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app import app, db, engine
+from app import app, db, engine, DEMO_PASSWORD
 
 RESULTS_DIR = Path(__file__).with_name("results")
 client = TestClient(app)
 events: list[dict] = []
+_token_cache: dict[str, str] = {}
+
+
+def auth_header(subject: str) -> dict:
+    if subject not in _token_cache:
+        res = client.post("/auth/login", json={"subject": subject, "password": DEMO_PASSWORD})
+        if res.status_code != 200:
+            client.post("/auth/register", json={"subject": subject, "password": DEMO_PASSWORD})
+            res = client.post("/auth/login", json={"subject": subject, "password": DEMO_PASSWORD})
+        _token_cache[subject] = res.json()["access_token"]
+    return {"Authorization": f"Bearer {_token_cache[subject]}"}
 
 
 def call(scenario: str, method: str, path: str, subject: str | None = None) -> dict:
-    headers = {"X-Subject": subject} if subject else {}
+    headers = auth_header(subject) if subject else {}
     started = time.perf_counter()
     response = client.request(method, path, headers=headers)
     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -179,7 +190,7 @@ def run_warmup_curve() -> list[dict]:
     subject = "warmup_curve_subject"
     rows = []
     for step, record_id in enumerate(range(600, 640), start=1):
-        r = client.get(f"/records/{record_id}", headers={"X-Subject": subject})
+        r = client.get(f"/records/{record_id}", headers=auth_header(subject))
         risk = client.get(f"/risk/{subject}").json()
         rows.append(
             {
@@ -191,7 +202,7 @@ def run_warmup_curve() -> list[dict]:
                 "signals": "|".join(risk["signals"]),
             }
         )
-        if engine.blocked_until.get(subject, 0) > time.time():
+        if engine.blocked_until(subject) > time.time():
             break
     return rows
 
