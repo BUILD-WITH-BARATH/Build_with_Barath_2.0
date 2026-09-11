@@ -976,7 +976,7 @@ class BehavioralRiskEngine:
 
 
 engine = BehavioralRiskEngine()
-app = FastAPI(title="BOLA Graph Benchmark")
+app = FastAPI(title="BOLA Graph Benchmark", version="1.1.1")
 
 _frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").split(",") if o.strip()]
 _cors_origins = _frontend_origins if _frontend_origins else (["*"] if APP_ENV != "prod" else [])
@@ -1057,7 +1057,7 @@ app.add_middleware(BodyObjectReferenceMiddleware)
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "env": APP_ENV, "demo_mode": DEMO_MODE}
+    return {"status": "ok", "env": APP_ENV, "demo_mode": DEMO_MODE, "version": "1.1.1"}
 
 
 def _rate_limit_key(request: Request) -> str:
