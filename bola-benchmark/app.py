@@ -788,6 +788,12 @@ def login(request: Request, payload: dict) -> dict:
     return {"access_token": token, "token_type": "bearer", "subject": subject, "role": row["role"], "expires_in": JWT_EXPIRY_SECONDS}
 
 
+@app.get("/auth/me")
+def me(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    subject, role, tenant_id = identity
+    return {"subject": subject, "role": role, "tenant_id": tenant_id}
+
+
 @app.post("/reset")
 @limiter.limit("60/minute")
 def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:

@@ -1,9 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
+import { LoginView } from './LoginView';
 
 const rawApiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const API_BASE = rawApiBase.startsWith('http') ? rawApiBase.replace(/\/$/, '') : `https://${rawApiBase}`.replace(/\/$/, '');
 
+interface UserSession {
+  subject: string;
+  role: string;
+  token: string;
+}
+
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<UserSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   const [stats, setStats] = useState<any>(null);
   const [config, setConfig] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
@@ -12,53 +24,106 @@ export default function App() {
   const [subjectInput, setSubjectInput] = useState('');
   const [isOnline, setIsOnline] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
-  const [authToken, setAuthToken] = useState<string | null>(null);
+
   const [probeActor, setProbeActor] = useState('alice');
   const [probeRecordId, setProbeRecordId] = useState('1');
   const [probeResult, setProbeResult] = useState<any>(null);
   const [isProbing, setIsProbing] = useState(false);
 
+  // Check saved session on boot via /auth/me
   useEffect(() => {
-    const autoLogin = async () => {
+    const checkSession = async () => {
+      const savedToken = localStorage.getItem('cyberaccess_token');
+      const savedSubject = localStorage.getItem('cyberaccess_subject');
+      const savedRole = localStorage.getItem('cyberaccess_role');
+      if (!savedToken) {
+        setAuthLoading(false);
+        return;
+      }
       try {
-        const res = await fetch(`${API_BASE}/auth/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subject: 'security_admin', password: 'admin_changeme123' })
+        const res = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${savedToken}` }
         });
         if (res.ok) {
           const data = await res.json();
-          setAuthToken(data.access_token);
+          setCurrentUser({ subject: data.subject, role: data.role, token: savedToken });
+          setSelectedSubject(data.subject);
+          setProbeActor(data.subject);
+          setIsOnline(true);
         } else {
-          const demoRes = await fetch(`${API_BASE}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subject: 'alice', password: 'changeme123' })
-          });
-          if (demoRes.ok) {
-            const demoData = await demoRes.json();
-            setAuthToken(demoData.access_token);
-          }
+          localStorage.removeItem('cyberaccess_token');
+          localStorage.removeItem('cyberaccess_subject');
+          localStorage.removeItem('cyberaccess_role');
         }
       } catch {
-        // Backend offline
+        if (savedSubject && savedRole) {
+          setCurrentUser({ subject: savedSubject, role: savedRole, token: savedToken });
+          setSelectedSubject(savedSubject);
+          setProbeActor(savedSubject);
+        }
+      } finally {
+        setAuthLoading(false);
       }
     };
-    autoLogin();
+    checkSession();
   }, []);
 
-  const fetchData = useCallback(async (subjOverride?: string) => {
-    const subj = subjOverride !== undefined ? subjOverride : (selectedSubject || 'alice');
+  const handleLogin = async (subjOverride?: string, pwdOverride?: string) => {
+    const s = (subjOverride || '').trim();
+    const p = pwdOverride || '';
+    if (!s || !p) {
+      setLoginError('Subject identity and password are required.');
+      return;
+    }
+    setIsLoggingIn(true);
+    setLoginError(null);
     try {
-      // /audit-events (and its alias /events) both require a security_admin bearer
-      // token server-side - there is no anonymous audit endpoint to fall back to.
-      // Skip the call entirely until authToken exists instead of guaranteeing a 401.
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: s, password: p })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setLoginError(errData.detail || 'Invalid subject credentials or access denied.');
+        setIsLoggingIn(false);
+        return;
+      }
+      const data = await res.json();
+      const user = { subject: data.subject, role: data.role, token: data.access_token };
+      setCurrentUser(user);
+      setSelectedSubject(data.subject);
+      setProbeActor(data.subject);
+      localStorage.setItem('cyberaccess_token', data.access_token);
+      localStorage.setItem('cyberaccess_subject', data.subject);
+      localStorage.setItem('cyberaccess_role', data.role);
+      setIsOnline(true);
+    } catch {
+      setLoginError('Security API backend is unreachable. Verify service is running on port 8000.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setLoginError(null);
+    localStorage.removeItem('cyberaccess_token');
+    localStorage.removeItem('cyberaccess_subject');
+    localStorage.removeItem('cyberaccess_role');
+  };
+
+  const fetchData = useCallback(async (subjOverride?: string) => {
+    if (!currentUser) return;
+    const subj = subjOverride !== undefined ? subjOverride : (selectedSubject || currentUser.subject || 'alice');
+    try {
+      const isSecurityAdmin = currentUser.role === 'security_admin';
       const [statsRes, configRes, riskRes, eventsRes] = await Promise.all([
         fetch(`${API_BASE}/stats`),
         fetch(`${API_BASE}/config`),
         fetch(`${API_BASE}/risk/${encodeURIComponent(subj)}`),
-        authToken
-          ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${authToken}` } })
+        isSecurityAdmin
+          ? fetch(`${API_BASE}/audit-events`, { headers: { Authorization: `Bearer ${currentUser.token}` } })
           : Promise.resolve(null)
       ]);
 
@@ -73,15 +138,16 @@ export default function App() {
     } catch {
       setIsOnline(false);
     }
-  }, [selectedSubject, authToken]);
+  }, [selectedSubject, currentUser]);
 
   useEffect(() => {
+    if (!currentUser) return;
     fetchData();
     const timer = setInterval(() => {
       fetchData();
     }, 2500);
     return () => clearInterval(timer);
-  }, [fetchData]);
+  }, [fetchData, currentUser]);
 
   const simulate = async (type: string) => {
     setIsSimulating(true);
@@ -178,6 +244,26 @@ export default function App() {
     setIsProbing(false);
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0A] flex flex-col items-center justify-center font-sans">
+        <div className="w-10 h-10 border-2 border-[#FF3B5C]/20 border-t-[#FF3B5C] rounded-full animate-spin"></div>
+        <p className="text-xs font-mono text-[#A3A3A3] mt-4 tracking-widest uppercase">AUTHENTICATING OPERATOR SESSION...</p>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <LoginView
+        onLogin={handleLogin}
+        isLoggingIn={isLoggingIn}
+        loginError={loginError}
+        isOnline={isOnline}
+      />
+    );
+  }
+
   return (
     <>
       {/* BEGIN: MainHeader */}
@@ -198,15 +284,45 @@ export default function App() {
             <p className="text-[10px] font-mono tracking-widest text-[#A3A3A3] uppercase mt-1">DETERMINISTIC AUTH + BEHAVIORAL DEFENSE</p>
           </div>
         </div>
-        {/* Status Indicator Pill */}
-        <div>
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#171717] border border-[#262626] text-[#A3A3A3] text-xs font-mono tracking-wide shadow-xs">
-            {/* Radio/Signal Icon with Orange/Red indicator */}
+
+        {/* User Session & Status Indicators */}
+        <div className="flex items-center gap-3">
+          {/* Active Operator Badge */}
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#171717] border border-[#262626] text-xs font-mono shadow-xs">
+            <span className="text-sm">
+              {currentUser.role === 'security_admin' ? '🛡️' : currentUser.role === 'doctor' ? '🩺' : '👤'}
+            </span>
+            <span className="font-bold text-[#F5F5F5]">{currentUser.subject}</span>
+            <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+              currentUser.role === 'security_admin'
+                ? 'bg-[#201013] text-[#FF3B5C] border-[#DC2626]/40'
+                : currentUser.role === 'doctor'
+                ? 'bg-emerald-950/40 text-emerald-400 border-emerald-500/40'
+                : 'bg-[#1a1a1a] text-[#A3A3A3] border-[#333]'
+            }`}>
+              {currentUser.role === 'security_admin' ? 'SOC ADMIN' : currentUser.role.toUpperCase()}
+            </span>
+          </div>
+
+          {/* Status Indicator Pill */}
+          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#171717] border border-[#262626] text-[#A3A3A3] text-xs font-mono tracking-wide shadow-xs">
             <svg className="w-3.5 h-3.5 text-[#F97316]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 011.06 0z" strokeLinecap="round" strokeLinejoin="round"></path>
             </svg>
             <span className="text-[#F5F5F5]">{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
+
+          {/* Sign Out Button */}
+          <button
+            onClick={handleLogout}
+            title="Sign out of current operator session"
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[#1c0e11] hover:bg-[#281216] border border-[#FF3B5C]/50 hover:border-[#FF3B5C] text-[#FF3B5C] text-xs font-mono tracking-wide transition-all active:scale-95"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" strokeLinecap="round" strokeLinejoin="round"></path>
+            </svg>
+            <span>SIGN OUT</span>
+          </button>
         </div>
       </header>
       {/* END: MainHeader */}
@@ -480,7 +596,28 @@ export default function App() {
               <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">AUDIT TIMELINE</h2>
             </div>
             {/* Empty State Container or event items */}
-            {events.length === 0 ? (
+            {currentUser.role !== 'security_admin' ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-6 text-center border border-[#262626] rounded-xl bg-[#0A0A0A]">
+                <div className="w-10 h-10 rounded-full bg-[#201013] border border-[#FF3B5C]/40 flex items-center justify-center mb-3">
+                  <svg className="w-5 h-5 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" strokeLinecap="round" strokeLinejoin="round"></path>
+                  </svg>
+                </div>
+                <h3 className="text-xs font-bold font-sans text-[#F5F5F5] uppercase tracking-wide mb-1">
+                  RESTRICTED FORENSIC LOG
+                </h3>
+                <p className="text-[11px] font-mono text-[#737373] max-w-xs mb-4 leading-relaxed">
+                  Audit events contain cross-tenant forensics and require <span className="text-[#FF3B5C]">security_admin</span> authorization. Currently signed in as <span className="text-[#F5F5F5]">{currentUser.subject}</span> ({currentUser.role}).
+                </p>
+                <button
+                  type="button"
+                  onClick={() => handleLogin('security_admin', 'admin_changeme123')}
+                  className="px-3.5 py-2 rounded-xl bg-[#201013] hover:bg-[#2a1318] border border-[#FF3B5C]/60 hover:border-[#FF3B5C] text-[#FF3B5C] text-xs font-mono font-bold transition-all shadow-xs"
+                >
+                  SWITCH TO SOC ADMIN ➔
+                </button>
+              </div>
+            ) : events.length === 0 ? (
               <div className="flex-1 flex items-center justify-center py-20">
                 <p className="text-xs font-mono text-[#737373] tracking-wide">
                   No events recorded.
