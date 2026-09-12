@@ -520,6 +520,11 @@ export default function App() {
                     <span className="font-mono text-[9px] text-cyber-textMuted mt-1">
                       {statusColorConfig.desc}
                     </span>
+                    {risk?.is_blocked && (
+                      <span className="font-mono text-[9px] text-rose-400 font-bold mt-1.5 px-2 py-0.5 rounded bg-rose-950/40 border border-rose-800/50 animate-pulse">
+                        ⏱️ QUARANTINE: {risk.lockout_remaining_s || 120}s
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

@@ -40,6 +40,8 @@ export interface RiskResp {
   signals: string[];
   contributions: Record<string, number>;
   is_blocked: boolean;
+  strikes?: number;
+  lockout_remaining_s?: number;
 }
 
 export interface AuditEvent {
