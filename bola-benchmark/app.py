@@ -695,12 +695,26 @@ def authorization_context(tenant_id: str, subject: str, record_id: int | str, ac
 
 def record_audit(tenant_id: str, subject: str, record_id: int | str, authorization: str | None,
                   decision: str, outcome: str, explanations: list[str]) -> None:
+    now_ts = time.time()
     with db() as c:
         c.execute(
             'INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "authorization", '
             "detector_decision, outcome, explanation) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (tenant_id, time.time(), subject, str(record_id), authorization, decision, outcome, " | ".join(explanations)),
+            (tenant_id, now_ts, subject, str(record_id), authorization, decision, outcome, " | ".join(explanations)),
         )
+    try:
+        broadcast_sse_event("audit_event", {
+            "occurred_at": now_ts,
+            "subject_id": subject,
+            "record_id": str(record_id),
+            "authorization": authorization,
+            "detector_decision": decision,
+            "outcome": outcome,
+            "explanation": explanations,
+            "tenant_id": tenant_id,
+        })
+    except Exception:
+        pass
 
 
 def compute_record_graph_features(tenant_id: str, record_id: int | str) -> dict:
@@ -2494,10 +2508,16 @@ def get_config() -> dict:
 
 @app.get("/stats")
 def get_stats() -> dict:
+    now = time.time()
     engine.cleanup_stale(DEMO_TENANT_ID)
-    return {"active_subjects": engine.active_subject_count(DEMO_TENANT_ID),
-            "blocked_subjects": engine.blocked_subject_count(DEMO_TENANT_ID),
-            "coordinated_attacks": engine.coordinated_attacks(DEMO_TENANT_ID)}
+    with db() as c:
+        active_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_events WHERE at > %s", (now - 3600,)).fetchall())
+        blocked_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_blocks WHERE blocked_until > %s", (now,)).fetchall())
+    return {
+        "active_subjects": max(active_cnt, engine.active_subject_count(DEMO_TENANT_ID)),
+        "blocked_subjects": max(blocked_cnt, engine.blocked_subject_count(DEMO_TENANT_ID)),
+        "coordinated_attacks": engine.coordinated_attacks(DEMO_TENANT_ID)
+    }
 
 @app.get("/events")
 def get_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
@@ -2506,13 +2526,55 @@ def get_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -
     with db() as c:
         rows = c.execute(
             'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
-            "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 50", (tenant_id,)).fetchall()
+            "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 100", (tenant_id,)).fetchall()
     return {"events": [dict(row) for row in rows]}
+
+@app.get("/audit-timeline")
+def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_identity), limit: int = 50) -> dict:
+    """Returns filtered integrity audit timeline for dashboard: 404 probes, blocks, denials."""
+    _subject, role, tenant_id = identity
+    require_security_admin(role)
+    clamped_limit = max(1, min(limit, 200))
+    with db() as c:
+        rows = c.execute(
+            'SELECT id, occurred_at, subject_id, record_id, detector_decision, outcome, explanation '
+            "FROM audit_events WHERE tenant_id = %s AND ("
+            "  detector_decision IN ('block', 'alert') OR "
+            "  outcome IN ('blocked', 'denied') OR "
+            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%'"
+            ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, clamped_limit)).fetchall()
+    timeline = []
+    for row in rows:
+        timeline.append({
+            "id": row["id"],
+            "timestamp": row["occurred_at"],
+            "subject": row["subject_id"],
+            "resource": row["record_id"],
+            "decision": row["detector_decision"],
+            "outcome": row["outcome"],
+            "event_type": _classify_event(row["record_id"], row["detector_decision"]),
+            "details": row["explanation"],
+        })
+    return {"timeline": timeline, "total": len(timeline)}
+
+def _classify_event(record_id: str, decision: str) -> str:
+    """Classify event type for timeline display."""
+    if "404" in str(record_id):
+        return "404_probe"
+    if "canary" in str(record_id).lower():
+        return "canary_trap"
+    if decision == "block":
+        return "blocked_access"
+    return "denied_access"
 
 @app.get("/risk/{subject}")
 def get_risk(subject: str) -> dict:
     now = time.time()
     tenant_id = DEMO_TENANT_ID
+    with db() as c:
+        row = c.execute("SELECT tenant_id FROM risk_events WHERE subject = %s ORDER BY at DESC LIMIT 1", (subject,)).fetchone()
+    if row:
+        tenant_id = row["tenant_id"]
     res = engine.compute_risk(tenant_id, subject, now)
     strikes = engine.get_strike_count(tenant_id, subject, now)
     blocked_until = engine.blocked_until(tenant_id, subject)
