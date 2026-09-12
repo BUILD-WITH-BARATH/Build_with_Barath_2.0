@@ -1,4 +1,4 @@
-import { useState, FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import logoImg from '../assets/logo.png';
 import { API_BASE } from '../lib/api';
 

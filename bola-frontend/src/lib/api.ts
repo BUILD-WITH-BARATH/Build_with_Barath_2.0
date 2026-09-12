@@ -42,6 +42,7 @@ export interface RiskResp {
   is_blocked: boolean;
   strikes?: number;
   lockout_remaining_s?: number;
+  lockout_expires_at?: number;
 }
 
 export interface AuditEvent {

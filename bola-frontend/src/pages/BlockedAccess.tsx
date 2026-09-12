@@ -20,7 +20,6 @@ export default function BlockedAccess({
   contactEmail = 'security@company.com',
 }: BlockedAccessProps) {
   const isBlock = decision === 'block';
-  const isDeny = decision === 'deny';
 
   const signalLabels: Record<string, string> = {
     rapid_enumeration: '🔍 Object Enumeration',
@@ -31,7 +30,7 @@ export default function BlockedAccess({
     pattern_match: '🎯 Attack Pattern',
     canary_honeypot_triggered: '🚨 Honeypot Triggered',
     temporary_lockout: '🔒 Temporary Lockout',
-    3_strike_ban: '⛔ 3-Strike Policy',
+    '3_strike_ban': '⛔ 3-Strike Policy',
   };
 
   return (

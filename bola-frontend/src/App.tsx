@@ -30,6 +30,7 @@ export default function App() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [utcTime, setUtcTime] = useState('');
   const [activeBtn, setActiveBtn] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleLoginSuccess = (token: string) => {
@@ -78,14 +79,17 @@ export default function App() {
   const fetchRisk = async (subject: string) => {
     if (!subject.trim()) {
       setRisk(null);
+      setApiError(null);
       return;
     }
     setRiskLoading(true);
+    setApiError(null);
     try {
       setRisk(await getRisk(subject.trim()));
       setOnline(true);
-    } catch {
+    } catch (err) {
       setRisk(null);
+      setApiError(err instanceof Error ? err.message : 'Failed to fetch risk data');
     } finally {
       setRiskLoading(false);
     }
@@ -150,9 +154,7 @@ export default function App() {
       setStats(null);
       setRisk(null);
       setOnline(null);
-
-      // Reload fresh data from backend (events will be empty if reset worked)
-      await refreshPassive();
+      setApiError(null);
     } catch {
       // ignore
     } finally {
@@ -181,7 +183,9 @@ export default function App() {
         border: 'border-cyber-crimson/50',
         pulse: 'bg-rose-500',
         desc: 'High velocity threat detected',
-        glow: 'drop-shadow-[0_0_18px_rgba(244,63,94,0.6)]'
+        glow: 'drop-shadow-[0_0_18px_rgba(244,63,94,0.6)]',
+        barColor: 'bg-rose-500',
+        help: 'Critical threat level - immediate attention required'
       };
     }
     if (riskScore >= 35 || riskCategory.includes('SUSP') || riskCategory.includes('SLOW')) {
@@ -191,7 +195,9 @@ export default function App() {
         border: 'border-cyber-orange/50',
         pulse: 'bg-amber-500',
         desc: 'Anomalous telemetry flagged',
-        glow: 'drop-shadow-[0_0_18px_rgba(245,158,11,0.5)]'
+        glow: 'drop-shadow-[0_0_18px_rgba(245,158,11,0.5)]',
+        barColor: 'bg-amber-500',
+        help: 'Elevated risk - monitor closely'
       };
     }
     return {
@@ -200,7 +206,9 @@ export default function App() {
       border: 'border-emerald-500/30',
       pulse: 'bg-emerald-400',
       desc: 'Zero threats flagged',
-      glow: 'drop-shadow-[0_0_18px_rgba(255,42,68,0.5)]'
+      glow: 'drop-shadow-[0_0_18px_rgba(255,42,68,0.5)]',
+      barColor: 'bg-emerald-400',
+      help: 'Normal risk level'
     };
   }, [riskScore, riskCategory]);
 
@@ -337,8 +345,11 @@ export default function App() {
                     <div className="font-mono text-3xl font-extrabold text-slate-100 my-2">
                       {stats?.active_subjects ?? 0}
                     </div>
-                    <div className="font-mono text-[10px] uppercase font-semibold text-cyber-textMuted tracking-wider">
-                      ACTIVE SUBJECTS
+                    <div className="flex flex-col gap-1">
+                      <div className="font-mono text-[10px] uppercase font-semibold text-cyber-textMuted tracking-wider">
+                        ACTIVE SUBJECTS
+                      </div>
+                      <span className="font-mono text-[8px] text-slate-500">Users generating recent API requests</span>
                     </div>
                   </div>
 
@@ -350,8 +361,11 @@ export default function App() {
                     <div className="font-mono text-3xl font-extrabold text-cyber-crimson my-2">
                       {stats?.blocked_subjects ?? 0}
                     </div>
-                    <div className="font-mono text-[10px] uppercase font-semibold text-rose-400 tracking-wider">
-                      BLOCKED SUBJECTS
+                    <div className="flex flex-col gap-1">
+                      <div className="font-mono text-[10px] uppercase font-semibold text-rose-400 tracking-wider">
+                        BLOCKED SUBJECTS
+                      </div>
+                      <span className="font-mono text-[8px] text-rose-600">3-strike policy lockouts active</span>
                     </div>
                   </div>
                 </div>
@@ -365,10 +379,13 @@ export default function App() {
                       {attackCount} INCIDENTS
                     </span>
                   </div>
-                  <div className="font-mono text-[11px] uppercase font-semibold text-cyber-orange tracking-wider">
-                    COORDINATED ATTACKS DETECTED
+                  <div className="flex flex-col gap-1 mb-2">
+                    <div className="font-mono text-[11px] uppercase font-semibold text-cyber-orange tracking-wider">
+                      COORDINATED ATTACKS DETECTED
+                    </div>
+                    <span className="font-mono text-[8px] text-amber-600">Multiple subjects on same resource</span>
                   </div>
-                  <div className="mt-2 w-full bg-[#161311] h-1.5 rounded-full overflow-hidden">
+                  <div className="w-full bg-[#161311] h-1.5 rounded-full overflow-hidden">
                     <div
                       className="bg-cyber-orange h-full transition-all duration-500"
                       style={{ width: `${Math.min(100, attackCount * 33.3 || (attackCount > 0 ? 100 : 0))}%` }}
@@ -477,20 +494,28 @@ export default function App() {
                   </h2>
                 </div>
 
-                <form onSubmit={handleSearchSubmit} className="relative w-full sm:w-56">
+                <form onSubmit={handleSearchSubmit} className="relative w-full sm:w-auto">
                   <svg className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="21" x2="16.65" y1="21" y2="16.65"></line>
                   </svg>
                   <input
                     className="w-full bg-[#07090e] border border-cyber-border text-xs rounded-md pl-8 pr-3 py-1.5 text-slate-200 placeholder-neutral-500 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 font-mono transition-all"
-                    placeholder="Type a subject ID..."
+                    placeholder="alice, 192.168.1.1, or scan ID..."
                     type="text"
                     value={subjectInput}
                     onChange={(e) => onSubjectInput(e.target.value)}
                   />
                 </form>
               </div>
+
+              {apiError && (
+                <div className="rounded-lg bg-rose-950/40 border border-rose-800/60 p-3 mb-4">
+                  <p className="font-mono text-xs text-rose-300">
+                    ⚠️ {apiError}
+                  </p>
+                </div>
+              )}
 
               <div className="rounded-xl bg-gradient-to-b from-[#090d15] to-[#06080d] border border-cyber-border/90 p-5 relative overflow-hidden shadow-inner">
                 <div className="absolute inset-0 bg-[radial-gradient(#1f293d_1px,transparent_1px)] [background-size:16px_16px] opacity-25 pointer-events-none"></div>
@@ -501,10 +526,15 @@ export default function App() {
                     </span>
                     <div className="flex items-baseline gap-3">
                       <span className={`font-mono text-6xl font-extrabold tracking-tighter ${statusColorConfig.text} ${statusColorConfig.glow}`}>
-                        {riskLoading ? '...' : riskScore}
+                        {riskLoading ? (
+                          <span className="inline-block animate-spin">◌</span>
+                        ) : (
+                          riskScore
+                        )}
                       </span>
                       <span className="font-mono text-xs text-cyber-textMuted">/ 100</span>
                     </div>
+                    {riskLoading && <span className="font-mono text-[10px] text-cyan-400 mt-1">Analyzing...</span>}
                   </div>
 
                   <div className="flex flex-col items-end">
@@ -522,7 +552,7 @@ export default function App() {
                     </span>
                     {risk?.is_blocked && (
                       <span className="font-mono text-[9px] text-rose-400 font-bold mt-1.5 px-2 py-0.5 rounded bg-rose-950/40 border border-rose-800/50 animate-pulse">
-                        ⏱️ QUARANTINE: {risk.lockout_remaining_s || 120}s
+                        ⏱️ QUARANTINE: {risk.lockout_expires_at ? Math.max(0, risk.lockout_expires_at - Math.floor(Date.now() / 1000)) : (risk.lockout_remaining_s || 120)}s
                       </span>
                     )}
                   </div>
@@ -761,6 +791,32 @@ export default function App() {
                 </div>
                 <span className="text-cyber-textMuted">BUFFER: {events.length}/1000</span>
               </div>
+
+              {events.length > 0 && (
+                <div className="rounded-lg bg-[#080b11] border border-cyber-border/60 p-3 mb-3">
+                  <div className="text-[9px] font-mono uppercase font-semibold text-cyber-textMuted mb-2 tracking-wider">
+                    EVENT TYPE LEGEND
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                      <span className="text-slate-300">Blocked</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-pink-500"></span>
+                      <span className="text-slate-300">Canary</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-violet-500"></span>
+                      <span className="text-slate-300">404 Probe</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                      <span className="text-slate-300">Denied</span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {events.length === 0 ? (
                 <div className="flex-1 rounded-xl border border-dashed border-cyber-border bg-[#06080e]/80 relative flex flex-col items-center justify-center p-8 overflow-hidden">
