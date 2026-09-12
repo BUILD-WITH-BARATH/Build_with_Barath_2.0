@@ -455,6 +455,13 @@ def init_schema() -> None:
                 triggered_at DOUBLE PRECISION NOT NULL,
                 action_taken TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS soc_alerts (
+                id SERIAL PRIMARY KEY,
+                alert_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                occurred_at DOUBLE PRECISION NOT NULL,
+                payload JSONB NOT NULL
+            );
             """
         )
     # Each defensive migration below gets its OWN connection/transaction, not a
@@ -473,12 +480,26 @@ def init_schema() -> None:
         # string resource IDs, not just sequential integers). A database created
         # before this change keeps the old INTEGER column until this runs once.
         "ALTER TABLE records ALTER COLUMN id TYPE TEXT",
+        # Same drift, two more tables: assignments.record_id and
+        # access_grants.record_id were also created back when every record_id
+        # was a sequential integer. CREATE TABLE IF NOT EXISTS above never
+        # altered them once they existed, so a database from before the
+        # TEXT-id refactor kept both as INTEGER - found live via
+        # information_schema while chasing an "invalid input syntax for type
+        # integer" error from a dynamic (rec_<uuid>) resource ID.
+        "ALTER TABLE assignments ALTER COLUMN record_id TYPE TEXT",
+        "ALTER TABLE access_grants ALTER COLUMN record_id TYPE TEXT",
     ):
         try:
             with db() as c:
                 c.execute(migration_sql)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Swallowed on purpose for the common case (column/constraint
+            # already matches, so the ALTER is a harmless no-op that still
+            # errors) - but logged, not fully silent, so a genuinely new
+            # migration failure shows up instead of vanishing the way this
+            # exact class of bug did before.
+            print(f"[schema migration] skipped ({exc.__class__.__name__}): {migration_sql}")
 
 
 def seed_demo_tenant(force: bool = False) -> None:
@@ -1285,7 +1306,6 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
     return {"status": "reset"}
 
 
-soc_alerts: list[dict] = []
 _sse_subscribers: list[asyncio.Queue] = []
 
 
@@ -1319,9 +1339,15 @@ def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score
         "mitigation_action": mitigation,
         "recommended_secops_action": f"Revoke active OAuth token for '{subject}' and isolate network source." if strikes < 3 else f"PERMANENTLY BAN '{subject}' and revoke all credentials."
     }
-    soc_alerts.insert(0, alert_payload)
-    if len(soc_alerts) > 50:
-        soc_alerts.pop()
+    # Persisted, not an in-process list - a bare list only lives on whichever
+    # worker process handled the request, so under uvicorn --workers N (or
+    # after a restart) every alert dispatched on a different worker would
+    # silently vanish from /soc/alerts and /events/recent.
+    with db() as c:
+        c.execute(
+            "INSERT INTO soc_alerts (alert_id, tenant_id, occurred_at, payload) VALUES (%s, %s, %s, %s)",
+            (alert_payload["alert_id"], tenant_id, alert_payload["timestamp"], json.dumps(alert_payload))
+        )
 
     broadcast_sse_event("soc_alert", alert_payload)
     return alert_payload
@@ -1374,7 +1400,15 @@ def healthz() -> dict:
 def get_recent_events(limit: int = 50) -> dict:
     """Returns the most recent security and SOC events without requiring admin privilege."""
     clamped_limit = max(1, min(limit, 100))
-    return {"total": len(soc_alerts), "events": soc_alerts[:clamped_limit]}
+    with db() as c:
+        rows = c.execute(
+            "SELECT payload FROM soc_alerts WHERE tenant_id = %s ORDER BY id DESC LIMIT %s",
+            (DEMO_TENANT_ID, clamped_limit)
+        ).fetchall()
+    # Postgres auto-parses JSONB to a dict; the SQLite dev fallback has no
+    # JSONB type and stores it as plain text, so normalize both here.
+    events = [json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"] for r in rows]
+    return {"total": len(events), "events": events}
 
 
 @app.get("/benchmarks/summary")
@@ -2024,7 +2058,7 @@ def trigger_stored_reference(
     ref_id: str,
     identity: tuple[str, str, str] = Depends(get_current_identity),
 ) -> dict:
-    subject, _role, tenant_id = identity
+    subject, role, tenant_id = identity
     with db() as c:
         ref = c.execute(
             "SELECT id, tenant_id, subject_id, ref_type, target_resource_id, status FROM stored_references WHERE id = %s AND tenant_id = %s",
@@ -2033,6 +2067,21 @@ def trigger_stored_reference(
 
     if not ref:
         raise HTTPException(404, "Stored reference not found")
+
+    # BOLA fix: the tenant_id filter above only proves the reference belongs to
+    # the CALLER's tenant, not to the caller themselves. Re-validating
+    # ref["subject_id"]'s authorization (the original creator) says nothing
+    # about whether THIS caller has any relationship to the target resource -
+    # without this check, any subject in the tenant could trigger any other
+    # subject's stored reference just by knowing its ref_id.
+    is_owner = subject == ref["subject_id"]
+    is_admin = role == ADMIN_ROLE
+    if not (is_owner or is_admin):
+        engine.evaluate(tenant_id, subject, ref["target_resource_id"], allowed=False, endpoint="stored_ref")
+        record_audit(tenant_id, subject, ref["target_resource_id"], None, "deny", "denied_stored_ref_cross_subject",
+                     [f"Second-order BOLA prevented: '{subject}' attempted to trigger a stored reference owned by another subject."])
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this stored reference",
+                                         "attack_type": "second_order_bola"})
 
     target_id = ref["target_resource_id"]
     access = authorization_context(tenant_id, ref["subject_id"], target_id, action="read")
@@ -2515,8 +2564,14 @@ def get_pending_bans(identity: tuple[str, str, str] = Depends(get_current_identi
 def get_soc_alerts(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
     _subject, role, tenant_id = identity
     require_security_admin(role)
-    tenant_alerts = [a for a in soc_alerts if a.get("tenant_id") == tenant_id]
-    return {"total_alerts": len(tenant_alerts), "recent_alerts": tenant_alerts[:20]}
+    with db() as c:
+        total = c.execute("SELECT COUNT(*) AS n FROM soc_alerts WHERE tenant_id = %s", (tenant_id,)).fetchone()["n"]
+        rows = c.execute(
+            "SELECT payload FROM soc_alerts WHERE tenant_id = %s ORDER BY id DESC LIMIT 20",
+            (tenant_id,)
+        ).fetchall()
+    recent = [json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"] for r in rows]
+    return {"total_alerts": total, "recent_alerts": recent}
 
 
 @app.post("/soc/test-webhook")

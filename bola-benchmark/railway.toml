@@ -3,6 +3,16 @@ builder = "NIXPACKS"
 buildCommand = "pip install -r requirements.txt"
 
 [deploy]
-startCommand = "uvicorn app:app --host 0.0.0.0 --port $PORT"
+# 2 worker processes: every endpoint does synchronous, blocking DB work (each
+# Neon round-trip is ~1s from this deployment's region), so a single worker
+# serializes every other request behind whichever one is mid-query - e.g. the
+# multi-step /redteam/campaign call was blocking unrelated requests for
+# 20-30s under one worker. Known tradeoff: soc_alerts are now Postgres-backed
+# (safe across workers), but GET /events/stream (SSE) broadcasts only reach
+# subscribers connected to the same worker that dispatched the alert - the
+# current dashboard doesn't use SSE (it polls REST), so this doesn't affect
+# it today; revisit with Postgres LISTEN/NOTIFY or Redis pub/sub if a future
+# UI relies on live push across multiple workers.
+startCommand = "uvicorn app:app --host 0.0.0.0 --port $PORT --workers 2"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

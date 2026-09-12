@@ -3,6 +3,7 @@ import {
   getConfig, getStats, getRisk, getEvents, runSimulation, SCENARIOS,
   type ConfigResp, type StatsResp, type RiskResp, type AuditEvent,
 } from './lib/api';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const SIM_BUTTONS: Array<{ key: keyof typeof SCENARIOS; classes: string }> = [
   { key: 'NORMAL', classes: 'bg-[#171717] hover:bg-[#202020] text-[#F5F5F5] border border-[#262626]' },
@@ -139,6 +140,7 @@ function App() {
         {/* BEGIN: LeftColumn */}
         <div className="lg:col-span-4 flex flex-col gap-5">
           {/* Card: Security Overview */}
+          <ErrorBoundary label="Security Overview">
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="security-overview-card">
             <div className="flex items-center gap-2 mb-4">
               <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
@@ -161,8 +163,10 @@ function App() {
               <span className="text-[10px] font-bold text-[#F97316] uppercase tracking-wide mt-3">COORDINATED ATTACKS DETECTED</span>
             </div>
           </section>
+          </ErrorBoundary>
 
           {/* Card: System Config */}
+          <ErrorBoundary label="System Config">
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="system-config-card">
             <div className="flex items-center gap-2 mb-4">
               <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
@@ -193,12 +197,14 @@ function App() {
               </div>
             </div>
           </section>
+          </ErrorBoundary>
         </div>
         {/* END: LeftColumn */}
 
         {/* BEGIN: CenterColumn */}
         <div className="lg:col-span-4 flex flex-col gap-5">
           {/* Card: Live Risk Monitor */}
+          <ErrorBoundary label="Live Risk Monitor">
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-risk-monitor-card">
             <div className="flex items-center justify-between gap-2 mb-4">
               <div className="flex items-center gap-2">
@@ -246,8 +252,10 @@ function App() {
               </div>
             </div>
           </section>
+          </ErrorBoundary>
 
           {/* Card: Live Simulator */}
+          <ErrorBoundary label="Live Simulator">
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-simulator-card">
             <div className="flex items-center gap-2 mb-4">
               <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
@@ -282,12 +290,14 @@ function App() {
               </button>
             </div>
           </section>
+          </ErrorBoundary>
         </div>
         {/* END: CenterColumn */}
 
         {/* BEGIN: RightColumn */}
         <div className="lg:col-span-4 flex flex-col h-full">
           {/* Card: Audit Timeline */}
+          <ErrorBoundary label="Audit Timeline">
           <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm h-[550px] flex flex-col" data-purpose="audit-timeline-card">
             <div className="flex items-center gap-2 mb-4">
               <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
@@ -326,6 +336,7 @@ function App() {
               </div>
             )}
           </section>
+          </ErrorBoundary>
         </div>
         {/* END: RightColumn */}
       </main>
