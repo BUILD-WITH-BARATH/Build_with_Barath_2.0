@@ -47,10 +47,10 @@ export interface AuditEvent {
   occurred_at: number;
   subject_id: string;
   record_id: string;
-  authorization: string | null;
   detector_decision: string;
   outcome: string;
-  explanation: string[];
+  explanation: string;
+  event_type?: string;
 }
 
 export async function getConfig(): Promise<ConfigResp> {

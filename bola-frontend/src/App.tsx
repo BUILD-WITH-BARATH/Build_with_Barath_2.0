@@ -749,8 +749,8 @@ export default function App() {
                   {events.map((ev) => {
                     const isBlocked = ev.outcome === 'blocked';
                     const isDenied = ev.outcome === 'denied';
-                    const is404 = ev.record_id?.includes('404') || (ev as any).event_type === '404_probe';
-                    const isCanary = ev.record_id?.includes('canary') || (ev as any).event_type === 'canary_trap';
+                    const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404');
+                    const isCanary = ev.event_type === 'canary_trap' || ev.record_id?.includes('canary');
                     return (
                       <div
                         key={ev.id}
@@ -793,7 +793,7 @@ export default function App() {
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">
-                          <span>{ev.explanation?.[0] || (is404 ? 'object enumeration detected' : 'access event')}</span>
+                          <span>{ev.explanation || (is404 ? 'object enumeration detected' : 'access event')}</span>
                           <span>{timeAgo(ev.occurred_at)}</span>
                         </div>
                       </div>
