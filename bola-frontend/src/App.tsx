@@ -1,35 +1,45 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import logoImg from './assets/logo.png';
 import {
   getConfig, getStats, getRisk, getEvents, runSimulation, SCENARIOS,
   type ConfigResp, type StatsResp, type RiskResp, type AuditEvent,
+  API_BASE,
 } from './lib/api';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
-const SIM_BUTTONS: Array<{ key: keyof typeof SCENARIOS; classes: string }> = [
-  { key: 'NORMAL', classes: 'bg-[#171717] hover:bg-[#202020] text-[#F5F5F5] border border-[#262626]' },
-  { key: 'RAPID BOLA', classes: 'bg-[#1c0e11] hover:bg-[#261217] border border-[#FF3B5C] text-[#FF3B5C]' },
-  { key: 'LOW & SLOW', classes: 'bg-[#1c120a] hover:bg-[#26170d] border border-[#F97316] text-[#F97316]' },
-  { key: 'COORDINATED', classes: 'bg-[#1b0d0e] hover:bg-[#251214] border border-[#DC2626] text-[#DC2626]' },
-];
-
 function timeAgo(unixSeconds: number): string {
+  if (!unixSeconds) return 'LIVE';
   const diff = Math.max(0, Date.now() / 1000 - unixSeconds);
   if (diff < 60) return `${Math.round(diff)}s ago`;
   if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
   return `${Math.round(diff / 3600)}h ago`;
 }
 
-function App() {
+export default function App() {
   const [online, setOnline] = useState<boolean | null>(null);
   const [config, setConfig] = useState<ConfigResp | null>(null);
   const [stats, setStats] = useState<StatsResp | null>(null);
-  const [riskSubject, setRiskSubject] = useState('');
+  const [riskSubject, setRiskSubject] = useState('alice');
+  const [subjectInput, setSubjectInput] = useState('alice');
   const [risk, setRisk] = useState<RiskResp | null>(null);
   const [riskLoading, setRiskLoading] = useState(false);
   const [simRunning, setSimRunning] = useState<string | null>(null);
   const [simVerdict, setSimVerdict] = useState<string | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [utcTime, setUtcTime] = useState('');
+  const [activeBtn, setActiveBtn] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // UTC Clock
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      setUtcTime(now.toTimeString().slice(0, 8));
+    };
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const refreshPassive = async () => {
     try {
@@ -49,7 +59,7 @@ function App() {
 
   useEffect(() => {
     refreshPassive();
-    const timer = setInterval(refreshPassive, 6000);
+    const timer = setInterval(refreshPassive, 3000);
     return () => clearInterval(timer);
   }, []);
 
@@ -61,6 +71,7 @@ function App() {
     setRiskLoading(true);
     try {
       setRisk(await getRisk(subject.trim()));
+      setOnline(true);
     } catch {
       setRisk(null);
     } finally {
@@ -68,281 +79,722 @@ function App() {
     }
   };
 
-  const onSubjectInput = (value: string) => {
-    setRiskSubject(value);
+  useEffect(() => {
+    fetchRisk('alice');
+  }, []);
+
+  const onSubjectInput = (val: string) => {
+    setSubjectInput(val);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => fetchRisk(value), 500);
+    debounceRef.current = setTimeout(() => {
+      setRiskSubject(val.trim());
+      fetchRisk(val.trim());
+    }, 300);
+  };
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (subjectInput.trim()) {
+      setRiskSubject(subjectInput.trim());
+      fetchRisk(subjectInput.trim());
+    }
   };
 
   const runSim = async (kind: keyof typeof SCENARIOS) => {
+    setActiveBtn(kind);
+    setTimeout(() => setActiveBtn(null), 300);
     setSimRunning(kind);
     setSimVerdict(null);
     try {
-      const result = await runSimulation(kind);
-      setSimVerdict(`${result.verdict} (${result.interception_rate_percent}% intercepted, peak risk ${result.peak_risk_score})`);
-      setRiskSubject(result.attacker_subject);
-      await fetchRisk(result.attacker_subject);
+      const res = await runSimulation(kind);
+      setSimVerdict(`${res.verdict} · ${res.interception_rate_percent}% intercepted (${res.blocked_count} blocked, ${res.denied_count} denied of ${res.total_requests})`);
+      if (res.attacker_subject) {
+        setRiskSubject(res.attacker_subject);
+        setSubjectInput(res.attacker_subject);
+        await fetchRisk(res.attacker_subject);
+      }
       await refreshPassive();
-    } catch {
-      setSimVerdict('Simulation failed - backend unreachable.');
+    } catch (err) {
+      setSimVerdict(`simulation error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSimRunning(null);
     }
   };
 
-  const resetDemo = () => {
-    setRiskSubject('');
-    setRisk(null);
-    setSimVerdict(null);
-    refreshPassive();
+  const resetDemo = async () => {
+    setActiveBtn('reset');
+    setTimeout(() => setActiveBtn(null), 300);
+    setSimRunning('RESET');
+    try {
+      await fetch(`${API_BASE}/reset`, { method: 'POST' }).catch(() => null);
+      setRiskSubject('alice');
+      setSubjectInput('alice');
+      setSimVerdict(null);
+      await Promise.all([refreshPassive(), fetchRisk('alice')]);
+    } catch {
+      // ignore
+    } finally {
+      setSimRunning(null);
+    }
   };
 
-  const shortWindowLabel = config ? `${config.short_window}s` : '...';
-  const longWindowLabel = config ? `${config.long_window}s` : '...';
-  const shortThresholdLabel = config ? `Threshold: ${config.rapid_threshold} uniq` : 'Threshold: - uniq';
-  const longThresholdLabel = config ? `Threshold: ${config.slow_threshold} uniq` : 'Threshold: - uniq';
+  // Coordinated attacks calculation
+  const attackCount = useMemo(() => {
+    if (!stats?.coordinated_attacks) return 0;
+    if (typeof stats.coordinated_attacks === 'object') {
+      return Object.keys(stats.coordinated_attacks).length;
+    }
+    return Number(stats.coordinated_attacks) || 0;
+  }, [stats]);
+
+  // Risk display calculation
+  const riskScore = risk?.score ?? 0;
+  const riskCategory = (risk?.category || (riskScore > 70 ? 'CRITICAL' : riskScore > 35 ? 'SUSPICIOUS' : 'NORMAL')).toUpperCase();
+
+  const statusColorConfig = useMemo(() => {
+    if (riskScore >= 70 || riskCategory.includes('CRIT') || riskCategory.includes('BLOCK')) {
+      return {
+        text: 'text-cyber-crimson',
+        bg: 'bg-cyber-crimsonMuted/40',
+        border: 'border-cyber-crimson/50',
+        pulse: 'bg-rose-500',
+        desc: 'High velocity threat detected',
+        glow: 'drop-shadow-[0_0_18px_rgba(244,63,94,0.6)]'
+      };
+    }
+    if (riskScore >= 35 || riskCategory.includes('SUSP') || riskCategory.includes('SLOW')) {
+      return {
+        text: 'text-cyber-orange',
+        bg: 'bg-cyber-orangeMuted/40',
+        border: 'border-cyber-orange/50',
+        pulse: 'bg-amber-500',
+        desc: 'Anomalous telemetry flagged',
+        glow: 'drop-shadow-[0_0_18px_rgba(245,158,11,0.5)]'
+      };
+    }
+    return {
+      text: 'text-emerald-400',
+      bg: 'bg-emerald-500/10',
+      border: 'border-emerald-500/30',
+      pulse: 'bg-emerald-400',
+      desc: 'Zero threats flagged',
+      glow: 'drop-shadow-[0_0_18px_rgba(255,42,68,0.5)]'
+    };
+  }, [riskScore, riskCategory]);
+
+  // Calculated vectors from contributions or defaults
+  const vectorScores = useMemo(() => {
+    const contrib = risk?.contributions || {};
+    const authVel = Math.min(100, Math.round(Number(contrib.rapid_requests || contrib.auth_velocity || (riskScore > 50 ? riskScore : 0))));
+    const anomaly = Math.min(100, Math.round(Number(contrib.unusual_timing || contrib.timing_anomaly || (riskScore > 30 ? 45 : 0))));
+    const ipRep = Math.min(100, Math.round(Number(contrib.ip_reputation || (riskScore > 75 ? 80 : 0))));
+    const pattern = Math.min(100, Math.round(Number(contrib.pattern_match || contrib.cluster_overlap || (attackCount > 0 ? 85 : 0))));
+
+    return { authVel, anomaly, ipRep, pattern };
+  }, [risk, riskScore, attackCount]);
 
   return (
-    <div className="bg-[#0A0A0A] text-[#F5F5F5] min-h-screen flex flex-col">
+    <div className="cyber-grid-bg min-h-screen text-slate-200 font-sans flex flex-col selection:bg-rose-900 selection:text-white antialiased">
       {/* BEGIN: MainHeader */}
-      <header className="bg-[#111111] text-[#F5F5F5] px-6 py-3.5 flex items-center justify-between shadow-sm border-b border-[#262626] relative after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[1px] after:bg-gradient-to-r after:from-[#FF3B5C]/0 after:via-[#FF3B5C]/60 after:to-[#FF3B5C]/0">
-        <div className="flex items-center space-x-3.5">
-          <div className="flex items-center justify-center shrink-0">
-            <img
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuCNrNyR3WSUtFfGM6VrgbwEx5W3YT4wDBMwvdIctuRJj3_Smrnc5mN0xz7jGvWLkEYjVwKtGjJbIExISJuoxJKbcEtA6yDlhTcvIGy54TJL-sZeRAxY2CqSUUTRtHELarLG7hX3y2mXHkvDzhC8Dcr_cY56anYHRnCMsJIWHUyA03HX56YKQ5iG9CDSEssFrL3-T8d1GwaccYQ9TeHVdO1flp_NhmTuwB8ZZ0dqcgZnFBbllDXkUj0a"
-              alt="Futuristic Crimson Cyber Shield Emblem"
-              className="block object-contain drop-shadow-[0_0_12px_rgba(255,59,92,0.3)]"
-              style={{ width: 56, height: 56, mixBlendMode: 'screen', filter: 'brightness(1.2) contrast(1.1)' }}
-            />
+      <header className="w-full border-b border-cyber-border/80 bg-cyber-panel/85 backdrop-blur-md sticky top-0 z-50">
+        <div className="px-6 py-3 flex items-center justify-between gap-4 w-full">
+          {/* Brand & Title Lockup with 3D Floating Shield */}
+          <div className="flex items-center gap-3.5 group cursor-pointer select-none">
+            <div className="relative flex items-center justify-center">
+              {/* 3D Ambient Red Underglow */}
+              <div className="absolute inset-0 bg-cyber-crimson/25 rounded-full blur-md transform scale-90 group-hover:scale-110 group-hover:bg-cyber-crimson/45 transition-all duration-500 pointer-events-none"></div>
+              {/* Floating 3D Transparent Shield Emblem */}
+              <img
+                src={logoImg}
+                alt="INTEGRITY 3D Cyber Shield Emblem"
+                className="logo-float-3d relative z-10 w-12 h-12 md:w-13 md:h-13 object-contain transform group-hover:scale-110 transition-transform duration-300"
+              />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="font-mono text-xl font-black tracking-[0.24em] text-cyber-accent drop-shadow-[0_0_14px_rgba(255,42,68,0.5)] uppercase leading-none select-none">
+                  INTEGRITY
+                </h1>
+              </div>
+              <p className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-400 font-medium mt-1 select-none flex items-center gap-1.5">
+                <span className="w-1 h-1 rounded-full bg-cyber-accent animate-pulse"></span>
+                DETERMINISTIC AUTH <span className="text-neutral-600">•</span> BEHAVIORAL DEFENSE
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-wider leading-none text-[#FF3B5C] font-sans">INTEGRITY</h1>
-            <p className="text-[10px] font-mono tracking-widest text-[#A3A3A3] uppercase mt-1">DETERMINISTIC AUTH + BEHAVIORAL DEFENSE</p>
-          </div>
-        </div>
-        <div>
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#171717] border border-[#262626] text-[#A3A3A3] text-xs font-mono tracking-wide shadow-xs">
-            <svg
-              className="w-3.5 h-3.5"
-              style={{ color: online === false ? '#FF3B5C' : '#22D3A6' }}
-              fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"
+
+          {/* Telemetry & Network Heartbeat Bar */}
+          <div className="flex items-center gap-3">
+            {/* Heartbeat / Time indicator */}
+            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md border border-cyber-border bg-[#0a0d14]/70 font-mono text-[11px] text-cyber-textMuted">
+              <span className={`w-2 h-2 rounded-full ${online ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`}></span>
+              <span className="tracking-wider text-slate-400">
+                ENGINE HEARTBEAT: <span className={online ? 'text-cyan-400 font-semibold' : 'text-slate-500 font-semibold'}>{online ? 'SYNCED' : 'AWAITING'}</span>
+              </span>
+              <span className="text-neutral-600">|</span>
+              <span className="text-slate-400">UTC {utcTime || '12:00:00'}</span>
+            </div>
+
+            {/* Connection State Indicator Button */}
+            <button
+              onClick={() => refreshPassive()}
+              title="Click to refresh telemetry"
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md border transition-all shadow-sm group ${
+                online
+                  ? 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20'
+                  : 'border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20'
+              }`}
+              type="button"
             >
-              <path d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 011.06 0z" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            <span className="text-[#F5F5F5]">{online === null ? 'CHECKING...' : online ? 'ONLINE' : 'OFFLINE'}</span>
+              <span className="relative flex h-2 w-2">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${online ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${online ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+              </span>
+              <svg className={`w-3.5 h-3.5 transition-colors ${online ? 'text-emerald-400 group-hover:text-emerald-300' : 'text-amber-500/90 group-hover:text-amber-400'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+                <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                <line strokeWidth="3" x1="12" x2="12.01" y1="20" y2="20"></line>
+              </svg>
+              <span className={`font-mono text-xs font-semibold uppercase tracking-wider ${online ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {online ? 'ONLINE' : 'OFFLINE'}
+              </span>
+            </button>
           </div>
         </div>
       </header>
       {/* END: MainHeader */}
 
-      {/* BEGIN: MainContentGrid */}
-      <main className="flex-1 max-w-[1720px] w-full mx-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* BEGIN: LeftColumn */}
-        <div className="lg:col-span-4 flex flex-col gap-5">
-          {/* Card: Security Overview */}
+      {/* BEGIN: DashboardLayout (Functional Command Grid) */}
+      <main className="flex-1 w-full p-5 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* ========================================================================= */}
+        {/* COLUMN 1: POSTURE & ENGINE (Left Column - 3 cols) */}
+        {/* ========================================================================= */}
+        <div className="lg:col-span-3 xl:col-span-3 flex flex-col gap-5">
+          {/* BEGIN: SecurityOverviewCard */}
           <ErrorBoundary label="Security Overview">
-          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="security-overview-card">
-            <div className="flex items-center gap-2 mb-4">
-              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                <path d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">SECURITY OVERVIEW</h2>
-            </div>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div className="bg-[#171717] border border-[#262626] rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#3a3a3a] transition-colors">
-                <span className="text-2xl font-bold text-[#F5F5F5] leading-none">{stats?.active_subjects ?? 0}</span>
-                <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mt-3">ACTIVE SUBJECTS</span>
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative overflow-hidden shadow-tactical flex flex-col justify-between flex-1">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-rose-500/40 via-amber-500/30 to-transparent"></div>
+              <div>
+                <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-sm bg-rose-500 shadow-[0_0_8px_#f43f5e]"></span>
+                    <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                      SECURITY OVERVIEW
+                    </h2>
+                  </div>
+                  <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                    Real-time Telemetry
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div className="rounded-lg bg-[#0a0d14] border border-cyber-border p-3.5 flex flex-col justify-between hover:border-slate-700 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                      <span className="font-mono text-[9px] text-cyber-textMuted tracking-wider">LIVE</span>
+                    </div>
+                    <div className="font-mono text-3xl font-extrabold text-slate-100 my-2">
+                      {stats?.active_subjects ?? 0}
+                    </div>
+                    <div className="font-mono text-[10px] uppercase font-semibold text-cyber-textMuted tracking-wider">
+                      ACTIVE SUBJECTS
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-cyber-crimsonMuted/20 border border-cyber-crimson/40 p-3.5 flex flex-col justify-between shadow-glowRed/30 hover:border-cyber-crimson/70 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                      <span className="font-mono text-[9px] text-rose-400/80 tracking-wider">QUARANTINE</span>
+                    </div>
+                    <div className="font-mono text-3xl font-extrabold text-cyber-crimson my-2">
+                      {stats?.blocked_subjects ?? 0}
+                    </div>
+                    <div className="font-mono text-[10px] uppercase font-semibold text-rose-400 tracking-wider">
+                      BLOCKED SUBJECTS
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg bg-cyber-orangeMuted/20 border border-cyber-orange/40 p-4 shadow-glowOrange/30 hover:border-cyber-orange/70 transition-colors">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="font-mono text-3xl font-extrabold text-cyber-orange">
+                      {attackCount}
+                    </div>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold tracking-wider uppercase bg-cyber-orange/10 text-cyber-orange border border-cyber-orange/30">
+                      {attackCount} INCIDENTS
+                    </span>
+                  </div>
+                  <div className="font-mono text-[11px] uppercase font-semibold text-cyber-orange tracking-wider">
+                    COORDINATED ATTACKS DETECTED
+                  </div>
+                  <div className="mt-2 w-full bg-[#161311] h-1.5 rounded-full overflow-hidden">
+                    <div
+                      className="bg-cyber-orange h-full transition-all duration-500"
+                      style={{ width: `${Math.min(100, attackCount * 33.3 || (attackCount > 0 ? 100 : 0))}%` }}
+                    ></div>
+                  </div>
+                </div>
               </div>
-              <div className="bg-[#201013] border border-[#DC2626]/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#FF3B5C]/60 transition-colors">
-                <span className="text-2xl font-bold text-[#FF3B5C] leading-none">{stats?.blocked_subjects ?? 0}</span>
-                <span className="text-[10px] font-bold text-[#DC2626] uppercase tracking-wide mt-3">BLOCKED SUBJECTS</span>
-              </div>
-            </div>
-            <div className="bg-[#22140c] border border-[#F97316]/40 rounded-xl p-3.5 flex flex-col justify-between shadow-xs hover:border-[#F97316]/70 transition-colors">
-              <span className="text-2xl font-bold text-[#F97316] leading-none">{stats ? Object.keys(stats.coordinated_attacks).length : 0}</span>
-              <span className="text-[10px] font-bold text-[#F97316] uppercase tracking-wide mt-3">COORDINATED ATTACKS DETECTED</span>
-            </div>
-          </section>
+            </section>
           </ErrorBoundary>
 
-          {/* Card: System Config */}
+          {/* BEGIN: SystemConfigCard */}
           <ErrorBoundary label="System Config">
-          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="system-config-card">
-            <div className="flex items-center gap-2 mb-4">
-              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                <path d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">SYSTEM CONFIG</h2>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <span className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">SHORT WINDOW</span>
-                <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl py-2 px-3 flex items-center gap-2">
-                  <svg className="w-3.5 h-3.5 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" />
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex flex-col flex-1">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-cyan-500/40 via-blue-500/20 to-transparent"></div>
+              <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                    <polyline points="2 17 12 22 22 17"></polyline>
+                    <polyline points="2 12 12 17 22 12"></polyline>
                   </svg>
-                  <span className="text-xs font-semibold text-[#F5F5F5]">{shortWindowLabel}</span>
+                  <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                    SYSTEM CONFIG
+                  </h2>
                 </div>
-                <span className="block text-[10px] text-[#737373] mt-1 font-mono">{shortThresholdLabel}</span>
-              </div>
-              <div>
-                <span className="block text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1.5">LONG WINDOW</span>
-                <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl py-2 px-3 flex items-center gap-2">
-                  <svg className="w-3.5 h-3.5 text-[#F97316]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <span className="text-xs font-semibold text-[#F5F5F5]">{longWindowLabel}</span>
-                </div>
-                <span className="block text-[10px] text-[#737373] mt-1 font-mono">{longThresholdLabel}</span>
-              </div>
-            </div>
-          </section>
-          </ErrorBoundary>
-        </div>
-        {/* END: LeftColumn */}
-
-        {/* BEGIN: CenterColumn */}
-        <div className="lg:col-span-4 flex flex-col gap-5">
-          {/* Card: Live Risk Monitor */}
-          <ErrorBoundary label="Live Risk Monitor">
-          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-risk-monitor-card">
-            <div className="flex items-center justify-between gap-2 mb-4">
-              <div className="flex items-center gap-2">
-                <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                  <path d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">LIVE RISK MONITOR</h2>
-              </div>
-              <div className="relative w-40">
-                <input
-                  className="w-full bg-[#0A0A0A] border border-[#262626] text-[#F5F5F5] placeholder-[#737373] text-xs rounded-lg py-1 px-2.5 focus:outline-none focus:ring-1 focus:ring-[#FF3B5C] focus:border-[#FF3B5C] transition-colors"
-                  placeholder="Type a subject ID..."
-                  type="text"
-                  value={riskSubject}
-                  onChange={(e) => onSubjectInput(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="bg-[#0A0A0A] border border-[#262626] rounded-xl p-5 flex items-center justify-between mb-5 shadow-xs">
-              <div className="text-5xl font-extrabold text-[#FF3B5C] tracking-tight drop-shadow-[0_0_12px_rgba(255,59,92,0.3)]">
-                {riskLoading ? '...' : risk?.score ?? 0}
-              </div>
-              <div className="flex flex-col items-end">
-                <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide mb-1">STATUS</span>
-                <span className="bg-[#171717] border border-[#262626] text-[#F5F5F5] text-xs font-bold px-2.5 py-0.5 rounded uppercase tracking-wide">
-                  {risk?.category ?? 'NORMAL'}
+                <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                  Engine Parameters
                 </span>
               </div>
-            </div>
-            <div className="pt-1">
-              <span className="text-[10px] font-bold text-[#A3A3A3] uppercase tracking-wide">SCORE BREAKDOWN</span>
-              <div className="flex flex-col gap-1 mt-2">
-                {risk && Object.keys(risk.contributions).length > 0 ? (
-                  Object.entries(risk.contributions).map(([signal, val]) => (
-                    <div key={signal} className="flex items-center justify-between text-[11px] font-mono">
-                      <span className="text-[#A3A3A3]">{signal}</span>
-                      <span className="text-[#F5F5F5]">+{val}</span>
-                    </div>
-                  ))
-                ) : (
-                  <span className="text-[11px] font-mono text-[#525252]">
-                    {riskSubject ? 'no signals for this subject' : 'type a subject ID above'}
-                  </span>
-                )}
-              </div>
-            </div>
-          </section>
-          </ErrorBoundary>
 
-          {/* Card: Live Simulator */}
-          <ErrorBoundary label="Live Simulator">
-          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm" data-purpose="live-simulator-card">
-            <div className="flex items-center gap-2 mb-4">
-              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                <path d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">LIVE SIMULATOR</h2>
-            </div>
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              {SIM_BUTTONS.map((btn) => (
-                <button
-                  key={btn.key}
-                  onClick={() => runSim(btn.key)}
-                  disabled={simRunning !== null}
-                  className={`${btn.classes} font-bold text-xs py-3 px-4 rounded-xl shadow-xs transition-colors tracking-wide disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  {simRunning === btn.key ? 'RUNNING...' : btn.key}
-                </button>
-              ))}
-            </div>
-            {simVerdict && (
-              <p className="text-[11px] font-mono text-[#A3A3A3] text-center mb-2 leading-relaxed">{simVerdict}</p>
-            )}
-            <div className="flex justify-center pt-2">
-              <button
-                onClick={resetDemo}
-                className="inline-flex items-center justify-center gap-2 bg-[#171717] hover:bg-[#222222] border border-[#262626] text-[#F5F5F5] font-bold text-xs py-2 px-5 rounded-xl shadow-xs hover:shadow-sm transition-all"
-              >
-                <svg className="w-3.5 h-3.5 text-[#A3A3A3]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                <span>RESET DEMO</span>
-              </button>
-            </div>
-          </section>
+              <div className="grid grid-cols-2 gap-3.5">
+                <div className="rounded-lg bg-[#0a0d14] border border-cyber-border/80 p-3 hover:border-slate-700 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-cyber-textMuted">
+                      SHORT WINDOW
+                    </span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                  </div>
+                  <div className="flex items-center gap-2 bg-[#10141e] border border-cyber-border rounded-md px-2.5 py-1.5">
+                    <svg className="w-3.5 h-3.5 text-cyber-orange" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <span className="font-mono text-xs font-semibold text-slate-200">
+                      {config?.short_window ?? 0}s
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[10px] text-cyber-textMuted mt-2">
+                    Threshold: {config?.rapid_threshold ? `${config.rapid_threshold} ` : ''}uniq
+                  </span>
+                </div>
+
+                <div className="rounded-lg bg-[#0a0d14] border border-cyber-border/80 p-3 hover:border-slate-700 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-cyber-textMuted">
+                      LONG WINDOW
+                    </span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-500"></span>
+                  </div>
+                  <div className="flex items-center gap-2 bg-[#10141e] border border-cyber-border rounded-md px-2.5 py-1.5">
+                    <svg className="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <span className="font-mono text-xs font-semibold text-slate-200">
+                      {config?.long_window ?? 0}s
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[10px] text-cyber-textMuted mt-2">
+                    Threshold: {config?.slow_threshold ? `${config.slow_threshold} ` : ''}uniq
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-cyber-border/40 flex items-center justify-between text-[10px] font-mono text-cyber-textMuted">
+                <span>ALGORITHM: BEHAVIORAL_HEURISTICS</span>
+                <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  ENFORCING
+                </span>
+              </div>
+            </section>
           </ErrorBoundary>
         </div>
-        {/* END: CenterColumn */}
+        {/* END: Column 1 */}
 
-        {/* BEGIN: RightColumn */}
-        <div className="lg:col-span-4 flex flex-col h-full">
-          {/* Card: Audit Timeline */}
-          <ErrorBoundary label="Audit Timeline">
-          <section className="bg-[#171717] rounded-2xl p-5 border border-[#262626] shadow-sm h-[550px] flex flex-col" data-purpose="audit-timeline-card">
-            <div className="flex items-center gap-2 mb-4">
-              <svg className="w-4 h-4 text-[#FF3B5C]" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                <path d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <h2 className="text-xs font-bold tracking-wider text-[#F5F5F5] uppercase font-sans">AUDIT TIMELINE</h2>
-            </div>
-            {events.length === 0 ? (
-              <div className="flex-1 flex items-center justify-center py-20">
-                <p className="text-xs font-mono text-[#737373] tracking-wide">No events recorded.</p>
+        {/* ========================================================================= */}
+        {/* COLUMN 2: PRIMARY COMMAND & SIMULATOR CONSOLE (Center Column - 5 cols) */}
+        {/* ========================================================================= */}
+        <div className="lg:col-span-5 xl:col-span-5 flex flex-col gap-5">
+          {/* BEGIN: LiveRiskMonitorCard */}
+          <ErrorBoundary label="Live Risk Monitor">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex flex-col overflow-hidden">
+              <div className="absolute -top-16 left-1/2 -translate-x-1/2 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-2 border-b border-cyber-border/60 relative z-10">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-cyber-accent" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="9" cy="7" r="4"></circle>
+                    <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                  </svg>
+                  <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-100">
+                    LIVE RISK MONITOR
+                  </h2>
+                </div>
+
+                <form onSubmit={handleSearchSubmit} className="relative w-full sm:w-56">
+                  <svg className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500 pointer-events-none" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" x2="16.65" y1="21" y2="16.65"></line>
+                  </svg>
+                  <input
+                    className="w-full bg-[#07090e] border border-cyber-border text-xs rounded-md pl-8 pr-3 py-1.5 text-slate-200 placeholder-neutral-500 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 font-mono transition-all"
+                    placeholder="Type a subject ID..."
+                    type="text"
+                    value={subjectInput}
+                    onChange={(e) => onSubjectInput(e.target.value)}
+                  />
+                </form>
               </div>
-            ) : (
-              <div className="flex-1 overflow-y-auto flex flex-col gap-2 pr-1">
-                {events.map((ev) => (
-                  <div key={ev.id} className="bg-[#0A0A0A] border border-[#262626] rounded-xl p-3 flex flex-col gap-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[#F5F5F5]">{ev.subject_id}</span>
-                      <span
-                        className="text-[10px] font-bold uppercase px-2 py-0.5 rounded"
-                        style={{
-                          color: ev.outcome === 'allowed' ? '#22D3A6' : '#FF3B5C',
-                          backgroundColor: ev.outcome === 'allowed' ? '#052e22' : '#2a0e14',
-                        }}
-                      >
-                        {ev.outcome}
+
+              <div className="rounded-xl bg-gradient-to-b from-[#090d15] to-[#06080d] border border-cyber-border/90 p-5 relative overflow-hidden shadow-inner">
+                <div className="absolute inset-0 bg-[radial-gradient(#1f293d_1px,transparent_1px)] [background-size:16px_16px] opacity-25 pointer-events-none"></div>
+                <div className="relative flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <span className="font-mono text-[10px] uppercase tracking-widest text-cyber-textMuted font-semibold mb-1">
+                      COMPOSITE THREAT SCORE: <span className="text-slate-300 font-mono">{riskSubject || 'N/A'}</span>
+                    </span>
+                    <div className="flex items-baseline gap-3">
+                      <span className={`font-mono text-6xl font-extrabold tracking-tighter ${statusColorConfig.text} ${statusColorConfig.glow}`}>
+                        {riskLoading ? '...' : riskScore}
+                      </span>
+                      <span className="font-mono text-xs text-cyber-textMuted">/ 100</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-end">
+                    <span className="font-mono text-[9px] uppercase font-bold tracking-widest text-cyber-textMuted mb-1.5">
+                      STATUS
+                    </span>
+                    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md border ${statusColorConfig.bg} ${statusColorConfig.border}`}>
+                      <span className={`w-2 h-2 rounded-full ${statusColorConfig.pulse} animate-pulse`}></span>
+                      <span className={`font-mono text-xs font-bold tracking-wider ${statusColorConfig.text}`}>
+                        {riskCategory}
                       </span>
                     </div>
-                    <span className="text-[10px] font-mono text-[#737373]">
-                      record #{ev.record_id} · {timeAgo(ev.occurred_at)}
+                    <span className="font-mono text-[9px] text-cyber-textMuted mt-1">
+                      {statusColorConfig.desc}
                     </span>
-                    {ev.explanation?.[0] && (
-                      <span className="text-[11px] text-[#A3A3A3] leading-snug">{ev.explanation[0]}</span>
-                    )}
                   </div>
-                ))}
+                </div>
               </div>
-            )}
-          </section>
+
+              <div className="mt-4 pt-3 border-t border-cyber-border/60">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-mono text-[10px] uppercase font-bold tracking-widest text-cyber-textMuted">
+                    SCORE BREAKDOWN
+                  </span>
+                  <span className="font-mono text-[9px] text-cyber-textMuted uppercase tracking-wider">
+                    Telemetry Vectors
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-lg bg-[#090c13] border border-cyber-border/70 p-2.5">
+                    <div className="flex justify-between items-center text-[10px] font-mono mb-1.5">
+                      <span className="text-slate-400">Auth Velocity</span>
+                      <span className="text-slate-300 font-bold">{vectorScores.authVel}%</span>
+                    </div>
+                    <div className="w-full bg-[#141a27] h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="bg-cyan-500 h-full transition-all duration-500"
+                        style={{ width: `${vectorScores.authVel}%` }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-[#090c13] border border-cyber-border/70 p-2.5">
+                    <div className="flex justify-between items-center text-[10px] font-mono mb-1.5">
+                      <span className="text-slate-400">Anomaly Vector</span>
+                      <span className="text-slate-300 font-bold">{vectorScores.anomaly}%</span>
+                    </div>
+                    <div className="w-full bg-[#141a27] h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="bg-rose-500 h-full transition-all duration-500"
+                        style={{ width: `${vectorScores.anomaly}%` }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-[#090c13] border border-cyber-border/70 p-2.5">
+                    <div className="flex justify-between items-center text-[10px] font-mono mb-1.5">
+                      <span className="text-slate-400">IP Reputation</span>
+                      <span className="text-slate-300 font-bold">{vectorScores.ipRep}%</span>
+                    </div>
+                    <div className="w-full bg-[#141a27] h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="bg-amber-500 h-full transition-all duration-500"
+                        style={{ width: `${vectorScores.ipRep}%` }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-[#090c13] border border-cyber-border/70 p-2.5">
+                    <div className="flex justify-between items-center text-[10px] font-mono mb-1.5">
+                      <span className="text-slate-400">Pattern Match</span>
+                      <span className="text-slate-300 font-bold">{vectorScores.pattern}%</span>
+                    </div>
+                    <div className="w-full bg-[#141a27] h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="bg-purple-500 h-full transition-all duration-500"
+                        style={{ width: `${vectorScores.pattern}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+
+                {risk?.contributions && Object.keys(risk.contributions).length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-cyber-border/30 space-y-1">
+                    {Object.entries(risk.contributions).map(([key, val]) => (
+                      <div key={key} className="flex items-center justify-between text-[10px] font-mono">
+                        <span className="text-cyber-textMuted uppercase">{key.replace(/_/g, ' ')}</span>
+                        <span className="text-cyber-crimson font-bold">+{Number(val)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          </ErrorBoundary>
+
+          {/* BEGIN: LiveSimulatorCard (Tactical Suite) */}
+          <ErrorBoundary label="Live Simulator">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex flex-col flex-1">
+              <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-cyber-orange" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                  </svg>
+                  <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-100">
+                    LIVE SIMULATOR
+                  </h2>
+                </div>
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded text-[9px] font-mono tracking-wider font-semibold text-rose-400 bg-rose-950/40 border border-rose-900/60 shadow-glowRed/20">
+                  TACTICAL SUITE
+                </span>
+              </div>
+
+              <p className="font-mono text-[11px] text-cyber-textMuted mb-3">
+                Trigger simulated attack payloads to test behavioral engine defenses:
+              </p>
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('NORMAL')}
+                  className={`btn-tactical group relative rounded-lg border border-slate-700/80 bg-gradient-to-b from-[#141b27] to-[#0c1018] p-3 text-center shadow-tactical hover:border-emerald-500/70 hover:shadow-glowEmerald/30 active:bg-neutral-800 disabled:opacity-50 ${
+                    activeBtn === 'NORMAL' ? 'ring-2 ring-emerald-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-slate-200 group-hover:text-emerald-300 transition-colors">
+                      {simRunning === 'NORMAL' ? 'RUNNING...' : 'NORMAL'}
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-cyber-textMuted mt-1">Standard Auth Flow</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('RAPID BOLA')}
+                  className={`btn-tactical group relative rounded-lg border border-rose-800/80 bg-gradient-to-b from-rose-950/40 to-[#120b10] p-3 text-center shadow-glowRed/20 hover:border-rose-500 hover:shadow-glowRed active:bg-rose-900/40 disabled:opacity-50 ${
+                    activeBtn === 'RAPID BOLA' ? 'ring-2 ring-rose-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_#f43f5e]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-rose-400 group-hover:text-rose-300 transition-colors">
+                      {simRunning === 'RAPID BOLA' ? 'RUNNING...' : 'RAPID BOLA'}
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">High Velocity Probe</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('LOW & SLOW')}
+                  className={`btn-tactical group relative rounded-lg border border-amber-600/70 bg-gradient-to-b from-amber-950/30 to-[#14100b] p-3 text-center shadow-glowOrange/20 hover:border-amber-500 hover:shadow-glowOrange active:bg-amber-950/40 disabled:opacity-50 ${
+                    activeBtn === 'LOW & SLOW' ? 'ring-2 ring-amber-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 shadow-[0_0_8px_#f59e0b]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-500 group-hover:text-amber-400 transition-colors">
+                      {simRunning === 'LOW & SLOW' ? 'RUNNING...' : 'LOW & SLOW'}
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-amber-500/70 mt-1">Evasive Timing Vector</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('COORDINATED')}
+                  className={`btn-tactical group relative rounded-lg border border-rose-800/80 bg-gradient-to-b from-rose-950/40 to-[#120b10] p-3 text-center shadow-glowRed/20 hover:border-rose-500 hover:shadow-glowRed active:bg-rose-900/40 disabled:opacity-50 ${
+                    activeBtn === 'COORDINATED' ? 'ring-2 ring-rose-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_#f43f5e]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-rose-400 group-hover:text-rose-300 transition-colors">
+                      {simRunning === 'COORDINATED' ? 'RUNNING...' : 'COORDINATED'}
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Distributed Attack</span>
+                </button>
+              </div>
+
+              {simVerdict && (
+                <div className="p-2.5 rounded-lg bg-[#0a0d14] border border-cyber-border mb-3 font-mono text-[11px] text-slate-300 leading-relaxed text-center">
+                  {simVerdict}
+                </div>
+              )}
+
+              <div className="mt-auto pt-2">
+                <button
+                  disabled={simRunning !== null}
+                  onClick={resetDemo}
+                  className={`btn-tactical w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-[#0a0d14] hover:bg-[#131926] border border-cyber-border hover:border-neutral-500 text-slate-300 hover:text-white transition-all shadow-tactical disabled:opacity-50 ${
+                    activeBtn === 'reset' ? 'ring-2 ring-rose-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <svg className={`w-4 h-4 text-slate-400 group-hover:rotate-180 transition-transform duration-500 ${simRunning === 'RESET' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                    <path d="M21 3v5h-5"></path>
+                    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                    <path d="M8 16H3v5"></path>
+                  </svg>
+                  <span className="font-mono text-xs font-bold uppercase tracking-wider">
+                    RESET DEMO
+                  </span>
+                </button>
+              </div>
+            </section>
           </ErrorBoundary>
         </div>
-        {/* END: RightColumn */}
+        {/* END: Column 2 */}
+
+        {/* ========================================================================= */}
+        {/* COLUMN 3: AUDIT LEDGER & STREAM (Right Column - 4 cols) */}
+        {/* ========================================================================= */}
+        <div className="lg:col-span-4 xl:col-span-4 flex flex-col">
+          <ErrorBoundary label="Audit Timeline">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex-1 flex flex-col min-h-[580px]">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-500/30 to-rose-500/30"></div>
+
+              <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                  </svg>
+                  <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                    AUDIT TIMELINE
+                  </h2>
+                </div>
+                <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                  Event Ledger
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between bg-[#080b11] border border-cyber-border rounded-lg px-3 py-2 mb-3 text-[11px] font-mono">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="text-slate-400">STREAM:</span>
+                  <span className="text-slate-200 font-semibold">ALL_CHANNELS</span>
+                </div>
+                <span className="text-cyber-textMuted">BUFFER: {events.length}/1000</span>
+              </div>
+
+              {events.length === 0 ? (
+                <div className="flex-1 rounded-xl border border-dashed border-cyber-border bg-[#06080e]/80 relative flex flex-col items-center justify-center p-8 overflow-hidden">
+                  <div className="relative w-40 h-40 mb-5 flex items-center justify-center">
+                    <div className="absolute inset-0 rounded-full border border-cyber-border/70"></div>
+                    <div className="absolute inset-4 rounded-full border border-cyber-border/50"></div>
+                    <div className="absolute inset-10 rounded-full border border-cyber-border/30"></div>
+                    <div className="absolute inset-x-0 top-1/2 h-[1px] bg-cyber-border/40"></div>
+                    <div className="absolute inset-y-0 left-1/2 w-[1px] bg-cyber-border/40"></div>
+                    <div className="absolute inset-0 rounded-full radar-sweep pointer-events-none opacity-40"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_#f43f5e]"></div>
+                  </div>
+
+                  <div className="text-center relative z-10 max-w-xs">
+                    <span className="font-mono text-sm font-semibold text-slate-300 tracking-wider block mb-1">
+                      No events recorded.
+                    </span>
+                    <p className="font-mono text-[11px] text-cyber-textMuted leading-relaxed">
+                      Monitoring telemetry stream for authorization attempts, velocity spikes, and defense events.
+                    </p>
+                  </div>
+
+                  <div className="absolute bottom-3 text-center">
+                    <span className="font-mono text-[9px] text-slate-500 uppercase tracking-widest">
+                      AWAITING STREAM INGESTION • LISTENING ON PORT 443
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[640px] pr-1">
+                  {events.map((ev) => {
+                    const isBlocked = ev.outcome === 'blocked';
+                    const isDenied = ev.outcome === 'denied';
+                    return (
+                      <div
+                        key={ev.id}
+                        className={`p-3 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
+                          isBlocked
+                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
+                            : isDenied
+                            ? 'bg-cyber-orangeMuted/20 border-cyber-orange/40 shadow-glowOrange/20'
+                            : 'bg-[#090c13] border-cyber-border hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isBlocked ? 'bg-rose-500' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'}`}></span>
+                            <span className="font-bold text-slate-200">{ev.subject_id}</span>
+                            {ev.record_id !== undefined && (
+                              <span className="text-cyber-textMuted text-[10px]">rec #{ev.record_id}</span>
+                            )}
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                              isBlocked
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : isDenied
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                            }`}
+                          >
+                            {ev.outcome}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">
+                          <span>{ev.explanation?.[0] || 'access event'}</span>
+                          <span>{timeAgo(ev.occurred_at)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </ErrorBoundary>
+        </div>
+        {/* END: Column 3 */}
       </main>
-      {/* END: MainContentGrid */}
+      {/* END: DashboardLayout */}
     </div>
   );
 }
-
-export default App;

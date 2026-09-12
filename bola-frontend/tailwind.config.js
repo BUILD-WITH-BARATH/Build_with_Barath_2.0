@@ -7,6 +7,23 @@ export default {
   theme: {
     extend: {
       colors: {
+        cyber: {
+          base: '#07090e',
+          panel: '#0d111a',
+          panelSub: '#111723',
+          cardHover: '#161e2e',
+          border: '#1e2638',
+          borderBright: '#2a364f',
+          crimson: '#f43f5e',
+          crimsonMuted: '#4c111a',
+          orange: '#f59e0b',
+          orangeMuted: '#422006',
+          emerald: '#10b981',
+          cyan: '#06b6d4',
+          accent: '#ff2a44',
+          textMuted: '#64748b',
+          textSub: '#94a3b8',
+        },
         brand: {
           dark: '#0A0A0A',
           card: '#171717',
@@ -20,15 +37,15 @@ export default {
         },
       },
       fontFamily: {
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
         sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
       },
       boxShadow: {
-        'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.04), 0 4px 6px -2px rgba(0, 0, 0, 0.02)',
-        'card': '0 10px 30px -5px rgba(15, 23, 42, 0.06), 0 0 1px 1px rgba(15, 23, 42, 0.04)',
-        'glow-emerald': '0 0 25px -5px rgba(16, 185, 129, 0.3)',
-        'glow-rose': '0 0 25px -5px rgba(244, 63, 94, 0.3)',
-        'glow-indigo': '0 0 25px -5px rgba(99, 102, 241, 0.3)',
+        glowRed: '0 0 20px -2px rgba(244, 63, 94, 0.35)',
+        glowOrange: '0 0 20px -2px rgba(245, 158, 11, 0.3)',
+        glowEmerald: '0 0 20px -2px rgba(16, 185, 129, 0.35)',
+        glowCyan: '0 0 20px -2px rgba(6, 182, 212, 0.3)',
+        tactical: 'inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 4px 12px rgba(0,0,0,0.6)',
       },
     },
   },
