@@ -144,6 +144,13 @@ Open browser and test:
    - Click "Simulate"
    - Should complete in <2 seconds
 
+5. **Audit Timeline (NEW)**
+   - Right side panel: "AUDIT TIMELINE"
+   - Should show real-time security events: 404 probes, blocks, denials
+   - 404 probes appear in **violet** with "404 PROBE" label
+   - Canary traps appear in **pink** with "CANARY" label
+   - Blocked attempts appear in **red** with "BLOCKED" label
+
 ---
 
 ## Lost-foundbyKM Integration
@@ -175,6 +182,23 @@ source .venv/Scripts/activate
 python manage.py migrate
 python manage.py runserver 0.0.0.0:8001
 ```
+
+### ✅ Test Audit Timeline (404 Probes)
+
+While Lost-foundbyKM is running, trigger 404 probes and watch the timeline:
+
+```bash
+# From another terminal, trigger 404 probes
+curl http://localhost:8001/item/999  # Non-existent item
+curl http://localhost:8001/items/888  # Another non-existent item
+curl http://localhost:8001/claim/777  # Non-existent claim
+```
+
+Expected results on dashboard:
+1. Each 404 probe appears in Audit Timeline within 3 seconds
+2. Marked as "404 PROBE" in **violet**
+3. Shows subject (IP or username) and resource ID
+4. Timestamp updates in real-time
 
 ### ✅ Test BOLA Protection
 
