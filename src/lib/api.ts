@@ -47,10 +47,10 @@ export interface AuditEvent {
   occurred_at: number;
   subject_id: string;
   record_id: string;
-  authorization: string | null;
   detector_decision: string;
   outcome: string;
-  explanation: string[];
+  explanation: string;
+  event_type?: string;
 }
 
 export async function getConfig(): Promise<ConfigResp> {
@@ -73,10 +73,19 @@ export async function getRisk(subject: string): Promise<RiskResp> {
 
 export async function getEvents(): Promise<AuditEvent[]> {
   const token = await adminToken();
-  const res = await fetch(`${API_BASE}/events`, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetch(`${API_BASE}/audit-timeline?limit=50`, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) throw new Error(`events: ${res.status}`);
   const data = await res.json();
-  return data.events || [];
+  return (data.timeline || []).map((e: any) => ({
+    id: e.id,
+    occurred_at: e.timestamp,
+    subject_id: e.subject,
+    record_id: e.resource,
+    detector_decision: e.decision,
+    outcome: e.outcome,
+    explanation: e.details,
+    event_type: e.event_type,
+  }));
 }
 
 export interface SimResult {

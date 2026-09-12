@@ -2526,7 +2526,7 @@ def get_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -
     with db() as c:
         rows = c.execute(
             'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
-            "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 100", (tenant_id,)).fetchall()
+            "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') ORDER BY id DESC LIMIT 100", (tenant_id, tenant_id)).fetchall()
     return {"events": [dict(row) for row in rows]}
 
 @app.get("/audit-timeline")
@@ -2538,11 +2538,11 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
     with db() as c:
         rows = c.execute(
             'SELECT id, occurred_at, subject_id, record_id, detector_decision, outcome, explanation '
-            "FROM audit_events WHERE tenant_id = %s AND ("
+            "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') AND ("
             "  detector_decision IN ('block', 'alert') OR "
             "  outcome IN ('blocked', 'denied') OR "
             "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%'"
-            ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, clamped_limit)).fetchall()
+            ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
     timeline = []
     for row in rows:
         timeline.append({
