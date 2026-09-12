@@ -749,18 +749,18 @@ export default function App() {
                   {events.map((ev) => {
                     const isBlocked = ev.outcome === 'blocked';
                     const isDenied = ev.outcome === 'denied';
-                    const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404');
+                    const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404') || ev.record_id?.startsWith('record_') || ev.record_id?.startsWith('item_');
                     const isCanary = ev.event_type === 'canary_trap' || ev.record_id?.includes('canary');
                     return (
                       <div
                         key={ev.id}
                         className={`p-3 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
-                          is404
-                            ? 'bg-violet-900/20 border-violet-500/50 shadow-lg shadow-violet-500/10'
+                          isBlocked
+                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
                             : isCanary
                             ? 'bg-pink-900/20 border-pink-500/50 shadow-lg shadow-pink-500/10'
-                            : isBlocked
-                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
+                            : is404
+                            ? 'bg-violet-900/20 border-violet-500/50 shadow-lg shadow-violet-500/10'
                             : isDenied
                             ? 'bg-cyber-orangeMuted/20 border-cyber-orange/40 shadow-glowOrange/20'
                             : 'bg-[#090c13] border-cyber-border hover:border-slate-700'
@@ -769,7 +769,7 @@ export default function App() {
                         <div className="flex items-center justify-between mb-1.5">
                           <div className="flex items-center gap-2">
                             <span className={`w-1.5 h-1.5 rounded-full ${
-                              is404 ? 'bg-violet-400' : isCanary ? 'bg-pink-400' : isBlocked ? 'bg-rose-500' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
+                              isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
                             }`}></span>
                             <span className="font-bold text-slate-200">{ev.subject_id}</span>
                             {ev.record_id !== undefined && (
@@ -778,18 +778,18 @@ export default function App() {
                           </div>
                           <span
                             className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                              is404
-                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
+                              isBlocked
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                                 : isCanary
                                 ? 'bg-pink-500/20 text-pink-300 border border-pink-500/40'
-                                : isBlocked
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : is404
+                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
                                 : isDenied
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                                 : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                             }`}
                           >
-                            {is404 ? '404 PROBE' : isCanary ? 'CANARY' : ev.outcome}
+                            {isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? '404 PROBE' : ev.outcome}
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">

@@ -6,6 +6,7 @@ import {
   API_BASE,
 } from './lib/api';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import Login from './pages/Login';
 
 function timeAgo(unixSeconds: number): string {
   if (!unixSeconds) return 'LIVE';
@@ -16,6 +17,7 @@ function timeAgo(unixSeconds: number): string {
 }
 
 export default function App() {
+  const [authToken, setAuthToken] = useState<string | null>(() => localStorage.getItem('authToken'));
   const [online, setOnline] = useState<boolean | null>(null);
   const [config, setConfig] = useState<ConfigResp | null>(null);
   const [stats, setStats] = useState<StatsResp | null>(null);
@@ -29,6 +31,16 @@ export default function App() {
   const [utcTime, setUtcTime] = useState('');
   const [activeBtn, setActiveBtn] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleLoginSuccess = (token: string) => {
+    localStorage.setItem('authToken', token);
+    setAuthToken(token);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('authToken');
+    setAuthToken(null);
+  };
 
   // UTC Clock
   useEffect(() => {
@@ -193,6 +205,11 @@ export default function App() {
     return { authVel, anomaly, ipRep, pattern };
   }, [risk, riskScore, attackCount]);
 
+  // Show login page if not authenticated
+  if (!authToken) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
   return (
     <div className="cyber-grid-bg min-h-screen text-slate-200 font-sans flex flex-col selection:bg-rose-900 selection:text-white antialiased">
       {/* BEGIN: MainHeader */}
@@ -259,6 +276,19 @@ export default function App() {
               <span className={`font-mono text-xs font-semibold uppercase tracking-wider ${online ? 'text-emerald-400' : 'text-amber-400'}`}>
                 {online ? 'ONLINE' : 'OFFLINE'}
               </span>
+            </button>
+
+            {/* Logout Button */}
+            <button
+              onClick={handleLogout}
+              title="Sign out of dashboard"
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-md border border-slate-700/50 bg-slate-900/50 hover:bg-slate-800/50 transition-all shadow-sm text-slate-300 hover:text-slate-200"
+              type="button"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+              </svg>
+              <span className="font-mono text-xs font-semibold uppercase tracking-wider">Logout</span>
             </button>
           </div>
         </div>
@@ -749,18 +779,18 @@ export default function App() {
                   {events.map((ev) => {
                     const isBlocked = ev.outcome === 'blocked';
                     const isDenied = ev.outcome === 'denied';
-                    const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404');
+                    const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404') || ev.record_id?.startsWith('record_') || ev.record_id?.startsWith('item_');
                     const isCanary = ev.event_type === 'canary_trap' || ev.record_id?.includes('canary');
                     return (
                       <div
                         key={ev.id}
                         className={`p-3 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
-                          is404
-                            ? 'bg-violet-900/20 border-violet-500/50 shadow-lg shadow-violet-500/10'
+                          isBlocked
+                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
                             : isCanary
                             ? 'bg-pink-900/20 border-pink-500/50 shadow-lg shadow-pink-500/10'
-                            : isBlocked
-                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
+                            : is404
+                            ? 'bg-violet-900/20 border-violet-500/50 shadow-lg shadow-violet-500/10'
                             : isDenied
                             ? 'bg-cyber-orangeMuted/20 border-cyber-orange/40 shadow-glowOrange/20'
                             : 'bg-[#090c13] border-cyber-border hover:border-slate-700'
@@ -769,7 +799,7 @@ export default function App() {
                         <div className="flex items-center justify-between mb-1.5">
                           <div className="flex items-center gap-2">
                             <span className={`w-1.5 h-1.5 rounded-full ${
-                              is404 ? 'bg-violet-400' : isCanary ? 'bg-pink-400' : isBlocked ? 'bg-rose-500' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
+                              isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
                             }`}></span>
                             <span className="font-bold text-slate-200">{ev.subject_id}</span>
                             {ev.record_id !== undefined && (
@@ -778,18 +808,18 @@ export default function App() {
                           </div>
                           <span
                             className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                              is404
-                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
+                              isBlocked
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                                 : isCanary
                                 ? 'bg-pink-500/20 text-pink-300 border border-pink-500/40'
-                                : isBlocked
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : is404
+                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
                                 : isDenied
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                                 : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                             }`}
                           >
-                            {is404 ? '404 PROBE' : isCanary ? 'CANARY' : ev.outcome}
+                            {isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? '404 PROBE' : ev.outcome}
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">

@@ -2541,7 +2541,7 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
             "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') AND ("
             "  detector_decision IN ('block', 'alert') OR "
             "  outcome IN ('blocked', 'denied') OR "
-            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%'"
+            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%'"
             ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
     timeline = []
     for row in rows:
@@ -2559,12 +2559,13 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
 
 def _classify_event(record_id: str, decision: str) -> str:
     """Classify event type for timeline display."""
-    if "404" in str(record_id):
-        return "404_probe"
-    if "canary" in str(record_id).lower():
-        return "canary_trap"
+    rec = str(record_id).lower()
     if decision == "block":
         return "blocked_access"
+    if "canary" in rec:
+        return "canary_trap"
+    if "404" in rec or "fuzz" in rec or "probe" in rec or rec.startswith("record_") or rec.startswith("item_") or rec.startswith("claim_"):
+        return "404_probe"
     return "denied_access"
 
 @app.get("/risk/{subject}")
