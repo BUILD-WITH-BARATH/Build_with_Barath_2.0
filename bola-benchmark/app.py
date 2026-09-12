@@ -969,7 +969,7 @@ class BehavioralRiskEngine:
             # so an attacker could evade both simply by batching instead of
             # calling /v1/authorize one at a time.
             return ep in ("records", "v1", "v1_batch", "records_batch", "records_mutation", "records_abac",
-                          "graphql", "hierarchy", "exports", "stored_ref", "async_jobs") or ep.startswith("body_ref:")
+                          "graphql", "hierarchy", "exports", "stored_ref", "async_jobs", "admin_login_probe", "admin_portal") or ep.startswith("body_ref:") or ep.startswith("admin_")
 
         unique_denied_short = len({e.record_id for e in denied_short if _is_tracked_resource(e.endpoint)})
         unique_denied_long = len({e.record_id for e in denied_all if _is_tracked_resource(e.endpoint)})
@@ -1049,6 +1049,12 @@ class BehavioralRiskEngine:
         if any(e.endpoint == "canary_trap" for e in denied_short):
             contributions["canary_honeypot_triggered"] = 100
             signals.append("canary_honeypot_triggered")
+
+        # Feature 10: Unauthorized administrative portal probing / false credential entry
+        admin_probes = [e for e in denied_short if e.endpoint.startswith("admin_") or str(e.record_id).startswith("privileged_admin") or e.endpoint in ("admin_login_probe", "admin_portal")]
+        if admin_probes:
+            contributions["unauthorized_admin_access_attempt"] = 90
+            signals.append("unauthorized_admin_access_attempt")
 
         if failed_long > 0:
             failure_ratio = failed_long / total_long if total_long > 0 else 0.0
@@ -1259,7 +1265,8 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "body_payload_object_injection": "Warning: Unauthorized object references detected embedded within the request body payload.",
         "relational_chain_mismatch": "Warning: Hierarchical parent-child relationship check failed (BOLA path traversal).",
         "second_order_bola_violation": "Warning: Second-order stored reference pointed to an unauthorized or foreign resource.",
-        "canary_honeypot_triggered": "CRITICAL: Honeypot canary trap triggered. Instant permanent ban enforced."
+        "canary_honeypot_triggered": "CRITICAL: Honeypot canary trap triggered. Instant permanent ban enforced.",
+        "unauthorized_admin_access_attempt": "Unauthorized attempt to access privileged administrative portal or authenticate with invalid credentials."
     }
     return [messages[s] for s in signals if s in messages]
 
@@ -2511,8 +2518,8 @@ def get_stats() -> dict:
     now = time.time()
     engine.cleanup_stale(DEMO_TENANT_ID)
     with db() as c:
-        active_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_events WHERE at > %s", (now - 3600,)).fetchall())
-        blocked_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_blocks WHERE blocked_until > %s", (now,)).fetchall())
+        active_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_events WHERE tenant_id = %s AND at > %s", (DEMO_TENANT_ID, now - 3600)).fetchall())
+        blocked_cnt = len(c.execute("SELECT DISTINCT subject FROM risk_blocks WHERE tenant_id = %s AND blocked_until > %s", (DEMO_TENANT_ID, now)).fetchall())
     return {
         "active_subjects": max(active_cnt, engine.active_subject_count(DEMO_TENANT_ID)),
         "blocked_subjects": max(blocked_cnt, engine.blocked_subject_count(DEMO_TENANT_ID)),
@@ -2542,7 +2549,7 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
             "  detector_decision IN ('block', 'alert') OR "
             "  outcome IN ('blocked', 'denied') OR "
             "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR "
-            "  record_id LIKE '%timer%' OR record_id LIKE '%quarantine%'"
+            "  record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%'"
             ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
     timeline = []
     for row in rows:
@@ -2563,6 +2570,8 @@ def _classify_event(record_id: str, decision: str) -> str:
     rec = str(record_id).lower()
     if "timer" in rec or "quarantine" in rec:
         return "quarantine_timer"
+    if "admin" in rec:
+        return "admin_probe"
     if decision == "block":
         return "blocked_access"
     if "canary" in rec:
@@ -2814,11 +2823,12 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     resource_id = payload.get("resource_id")
     authorized = bool(payload.get("authorized", False))
     http_verb = str(payload.get("http_verb", "GET")).upper()
+    endpoint = str(payload.get("endpoint") or payload.get("resource_name") or "v1")
     if not subject or resource_id is None:
         raise HTTPException(400, "subject and resource_id are required")
 
     decision, signals, _unseen, score, category = engine.evaluate(
-        tenant_id, subject, resource_id, authorized, endpoint="v1", http_verb=http_verb
+        tenant_id, subject, resource_id, authorized, endpoint=endpoint, http_verb=http_verb
     )
     detector_explanations = explain_detector_signals(signals)
 
@@ -2832,6 +2842,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     blocked_until = engine.blocked_until(tenant_id, subject)
     remaining = int(blocked_until - now_ts) if blocked_until > now_ts else (120 if final_decision == "block" else 0)
     expires_at = int(blocked_until) if blocked_until > now_ts else (int(now_ts + remaining) if final_decision == "block" else None)
+    strike_count = engine.get_strike_count(tenant_id, subject, now_ts)
 
     if final_decision == "block":
         expiry_str = time.strftime("%H:%M:%S UTC", time.gmtime(expires_at or (now_ts + remaining)))
@@ -2853,6 +2864,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "explanations": detector_explanations,
         "lockout_remaining_s": remaining,
         "lockout_expires_at": expires_at,
+        "strike_count": max(1, strike_count) if final_decision == "block" else strike_count,
     }
 
 
