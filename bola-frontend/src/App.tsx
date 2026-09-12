@@ -32,6 +32,7 @@ export default function App() {
   const [activeBtn, setActiveBtn] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [pauseRefresh, setPauseRefresh] = useState(false);
 
   const handleLoginSuccess = (token: string) => {
     localStorage.setItem('authToken', token);
@@ -55,6 +56,9 @@ export default function App() {
   }, []);
 
   const refreshPassive = async () => {
+    // Skip refresh if paused (e.g., after reset)
+    if (pauseRefresh) return;
+
     try {
       const [c, s] = await Promise.all([getConfig(), getStats()]);
       setConfig(c);
@@ -74,7 +78,7 @@ export default function App() {
     refreshPassive();
     const timer = setInterval(refreshPassive, 3000);
     return () => clearInterval(timer);
-  }, []);
+  }, [pauseRefresh]);
 
   const fetchRisk = async (subject: string) => {
     if (!subject.trim()) {
@@ -178,6 +182,7 @@ export default function App() {
     setActiveBtn('reset');
     setTimeout(() => setActiveBtn(null), 300);
     setSimRunning('RESET');
+    setPauseRefresh(true);  // Pause auto-refresh during reset
     try {
       // Reset backend database
       await fetch(`${API_BASE}/reset`, { method: 'POST' }).catch(() => null);
@@ -192,8 +197,13 @@ export default function App() {
       setRisk(null);
       setOnline(null);
       setApiError(null);
+
+      // Resume refresh after reset completes
+      await new Promise(r => setTimeout(r, 500));
+      setPauseRefresh(false);
     } catch {
       // ignore
+      setPauseRefresh(false);
     } finally {
       setSimRunning(null);
     }
