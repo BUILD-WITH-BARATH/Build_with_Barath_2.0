@@ -151,8 +151,8 @@ export default function App() {
       setRisk(null);
       setOnline(null);
 
-      // Reload all data fresh
-      await Promise.all([refreshPassive(), fetchRisk('alice')]);
+      // Reload fresh data from backend (events will be empty if reset worked)
+      await refreshPassive();
     } catch {
       // ignore
     } finally {
