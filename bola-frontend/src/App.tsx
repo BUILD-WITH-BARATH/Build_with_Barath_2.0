@@ -116,13 +116,50 @@ export default function App() {
     }
   };
 
-  const runSim = async (kind: keyof typeof SCENARIOS) => {
+  const runUrlBlockingAttack = async (attackType: string) => {
+    setActiveBtn(attackType);
+    setTimeout(() => setActiveBtn(null), 300);
+    setSimRunning(attackType);
+    setSimVerdict(null);
+    try {
+      const response = await fetch(`${API_BASE}/trigger-attack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attack_type: attackType }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        const msg = result.message || 'Attack executed';
+        setSimVerdict(`${msg} · Audit logs created`);
+
+        // Refresh to show new audit events
+        await new Promise(r => setTimeout(r, 500));
+        await refreshPassive();
+      } else {
+        setSimVerdict('Attack failed - backend error');
+      }
+    } catch (err) {
+      setSimVerdict(`attack error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSimRunning(null);
+    }
+  };
+
+  const runSim = async (kind: string) => {
+    // Handle URL blocking attacks
+    if (kind.startsWith('URL_BLOCKING')) {
+      return runUrlBlockingAttack(kind);
+    }
+
+    // Handle regular BOLA simulations
+    const simKind = kind as keyof typeof SCENARIOS;
     setActiveBtn(kind);
     setTimeout(() => setActiveBtn(null), 300);
     setSimRunning(kind);
     setSimVerdict(null);
     try {
-      const res = await runSimulation(kind);
+      const res = await runSimulation(simKind);
       setSimVerdict(`${res.verdict} · ${res.interception_rate_percent}% intercepted (${res.blocked_count} blocked, ${res.denied_count} denied of ${res.total_requests})`);
       if (res.attacker_subject) {
         setRiskSubject(res.attacker_subject);
@@ -725,6 +762,74 @@ export default function App() {
                     </span>
                   </div>
                   <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Distributed Attack</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('URL_BLOCKING_1')}
+                  className={`btn-tactical group relative rounded-lg border border-violet-800/80 bg-gradient-to-b from-violet-950/40 to-[#15100f] p-3 text-center shadow-glowRed/20 hover:border-violet-500 hover:shadow-glowRed active:bg-violet-900/40 disabled:opacity-50 ${
+                    activeBtn === 'URL_BLOCKING_1' ? 'ring-2 ring-violet-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-violet-500 shadow-[0_0_8px_#a78bfa]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-violet-400 group-hover:text-violet-300 transition-colors">
+                      MALICIOUS URLS
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-violet-400/70 mt-1">Form Injection Attack</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('URL_BLOCKING_2')}
+                  className={`btn-tactical group relative rounded-lg border border-fuchsia-800/80 bg-gradient-to-b from-fuchsia-950/40 to-[#120b10] p-3 text-center shadow-glowRed/20 hover:border-fuchsia-500 hover:shadow-glowRed active:bg-fuchsia-900/40 disabled:opacity-50 ${
+                    activeBtn === 'URL_BLOCKING_2' ? 'ring-2 ring-fuchsia-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-fuchsia-500 shadow-[0_0_8px_#f472b6]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-fuchsia-400 group-hover:text-fuchsia-300 transition-colors">
+                      ENUMERATION
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-fuchsia-400/70 mt-1">Multi-URL Bombardment</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('URL_BLOCKING_3')}
+                  className={`btn-tactical group relative rounded-lg border border-cyan-800/80 bg-gradient-to-b from-cyan-950/40 to-[#0d1418] p-3 text-center shadow-glowRed/20 hover:border-cyan-500 hover:shadow-glowRed active:bg-cyan-900/40 disabled:opacity-50 ${
+                    activeBtn === 'URL_BLOCKING_3' ? 'ring-2 ring-cyan-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_8px_#06b6d4]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-cyan-400 group-hover:text-cyan-300 transition-colors">
+                      MIXED ENDPOINTS
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-cyan-400/70 mt-1">Pattern Obfuscation</span>
+                </button>
+
+                <button
+                  disabled={simRunning !== null}
+                  onClick={() => runSim('URL_BLOCKING_4')}
+                  className={`btn-tactical group relative rounded-lg border border-pink-800/80 bg-gradient-to-b from-pink-950/40 to-[#140810] p-3 text-center shadow-glowRed/20 hover:border-pink-500 hover:shadow-glowRed active:bg-pink-900/40 disabled:opacity-50 ${
+                    activeBtn === 'URL_BLOCKING_4' ? 'ring-2 ring-pink-500/60' : ''
+                  }`}
+                  type="button"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-pink-500 shadow-[0_0_8px_#ec4899]"></span>
+                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-pink-400 group-hover:text-pink-300 transition-colors">
+                      CANARY PROBE
+                    </span>
+                  </div>
+                  <span className="block font-mono text-[9px] text-pink-400/70 mt-1">Honeypot Detection</span>
                 </button>
               </div>
 
