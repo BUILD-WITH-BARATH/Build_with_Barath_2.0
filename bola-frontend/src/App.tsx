@@ -21,8 +21,8 @@ export default function App() {
   const [online, setOnline] = useState<boolean | null>(null);
   const [config, setConfig] = useState<ConfigResp | null>(null);
   const [stats, setStats] = useState<StatsResp | null>(null);
-  const [riskSubject, setRiskSubject] = useState('alice');
-  const [subjectInput, setSubjectInput] = useState('alice');
+  const [riskSubject, setRiskSubject] = useState('');
+  const [subjectInput, setSubjectInput] = useState('');
   const [risk, setRisk] = useState<RiskResp | null>(null);
   const [riskLoading, setRiskLoading] = useState(false);
   const [simRunning, setSimRunning] = useState<string | null>(null);
@@ -92,7 +92,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchRisk('alice');
+    // Don't auto-fetch; let user type subject
   }, []);
 
   const onSubjectInput = (val: string) => {
@@ -142,8 +142,8 @@ export default function App() {
       await fetch(`${API_BASE}/reset`, { method: 'POST' }).catch(() => null);
 
       // Clear frontend state completely
-      setRiskSubject('alice');
-      setSubjectInput('alice');
+      setRiskSubject('');
+      setSubjectInput('');
       setSimVerdict(null);
       setEvents([]);  // Clear audit timeline
       setConfig(null);
