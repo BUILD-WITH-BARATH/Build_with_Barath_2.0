@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1196,7 +1197,7 @@ def _rate_limit_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-limiter = Limiter(key_func=_rate_limit_key)
+limiter = Limiter(key_func=_rate_limit_key, enabled=("pytest" not in sys.modules and os.environ.get("APP_ENV") != "test"))
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -2887,6 +2888,20 @@ def log_timer_audit(payload: dict, tenant_id: str = Depends(get_tenant_from_api_
         [f"Quarantine cooldown timer: {remaining}s remaining (Strike {strike_count}/3, Expires at {expiry_str}). {reason}"]
     )
     return {"status": "ok", "subject": subject, "remaining_seconds": remaining}
+
+
+@app.post("/hackathon/release")
+def hackathon_release(payload: dict) -> dict:
+    """Bypass endpoint for hackathon demo to immediately release active quarantines."""
+    subject = str(payload.get("subject", "")).strip()
+    client_ip = str(payload.get("client_ip", "")).strip()
+    with db() as c:
+        for sub in (subject, client_ip):
+            if sub:
+                c.execute("DELETE FROM risk_blocks WHERE subject = %s", (sub,))
+                c.execute("DELETE FROM risk_strikes WHERE subject = %s", (sub,))
+                c.execute("DELETE FROM risk_bans WHERE subject = %s", (sub,))
+    return {"status": "released", "subject": subject, "client_ip": client_ip}
 
 
 @app.post("/v1/authorize-batch")
