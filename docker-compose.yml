@@ -47,5 +47,25 @@
     depends_on:
       - backend
 
+  django:
+    build:
+      context: ./Lost-foundbyKM
+      dockerfile: Dockerfile
+    container_name: cyberaccess-django
+    restart: unless-stopped
+    environment:
+      CYBERACCESS_ENABLED: "true"
+      CYBERACCESS_API_URL: http://backend:8000
+      CYBERACCESS_API_KEY: "demo-key-12345"
+      CYBERACCESS_FAIL_OPEN: "true"
+      CYBERACCESS_TIMEOUT: "2.0"
+      DJANGO_SETTINGS_MODULE: lost_found_project.settings
+    ports:
+      - "8001:8001"
+    depends_on:
+      - backend
+    volumes:
+      - ./Lost-foundbyKM/database:/app/database
+
 volumes:
   postgres_data:
