@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Logs
 logs
 *.log
@@ -22,3 +23,18 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+=======
+node_modules/
+dist/
+.env
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+*.db
+*.db-shm
+*.db-wal
+bola.db
+bola-benchmark/results/
+bola-benchmark/data/
+>>>>>>> 173525fa0a8c7c76f4ce4493f01d23e3962b281e

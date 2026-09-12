@@ -518,7 +518,8 @@ def seed_demo_tenant(force: bool = False) -> None:
         for table in ("access_grants", "assignments", "records", "users",
                        "risk_events", "risk_strikes", "risk_blocks", "risk_bans",
                        "resource_nodes", "async_jobs", "stored_references",
-                       "abac_policies", "abac_field_redactions", "canary_records", "canary_triggers"):
+                       "abac_policies", "abac_field_redactions", "canary_records", "canary_triggers",
+                       "audit_events", "soc_alerts"):
             cur.execute(f"DELETE FROM {table} WHERE tenant_id = %s", (DEMO_TENANT_ID,))
 
         cur.execute(
@@ -2558,6 +2559,18 @@ def get_pending_bans(identity: tuple[str, str, str] = Depends(get_current_identi
     _subject, role, tenant_id = identity
     require_security_admin(role)
     return {"pending_bans": engine.pending_bans(tenant_id), "approved_bans": engine.approved_bans(tenant_id)}
+
+
+@app.post("/reset")
+@app.post("/admin/reset")
+def reset_demo_database() -> dict:
+    """Wipes all accumulated risk events, strikes, bans, audit ledgers, and resets the database to clean baseline."""
+    seed_demo_tenant(force=True)
+    return {
+        "status": "database_reset_successful",
+        "tenant_id": DEMO_TENANT_ID,
+        "message": "All database tables, audit events, risk strikes, and behavioral states have been cleared."
+    }
 
 
 @app.get("/soc/alerts")
