@@ -1,14 +1,4 @@
-﻿databases:
-  # Render-managed Postgres, provisioned automatically by this blueprint - the
-  # app is multi-tenant and Postgres-backed (no more SQLite/local disk), so
-  # this is required, not optional. Free plan works for a demo; upgrade for
-  # anything with real customer traffic (free-tier Postgres expires after 90 days).
-  - name: bola-postgres
-    plan: free
-    databaseName: bola
-    user: bola
-
-services:
+﻿services:
   # 1. FastAPI Behavioral Risk Engine & Multi-Tenant Product API
   - type: web
     name: bola-backend-api
@@ -19,10 +9,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
+      # No Render-managed Postgres here - Render's free plan caps free
+      # Postgres at one per account. Using an external Neon (or Supabase)
+      # connection string avoids that cap entirely and doesn't expire after
+      # 90 days like Render's free Postgres does. Set the actual value
+      # manually in the Render dashboard after first deploy.
       - key: DATABASE_URL
-        fromDatabase:
-          name: bola-postgres
-          property: connectionString
+        sync: false
       # app.py refuses to boot in prod mode until JWT_SECRET/DEMO_PASSWORD/ADMIN_PASSWORD/
       # TENANT_SIGNUP_KEY are all overridden from their dev-only defaults, and until
       # FRONTEND_ORIGIN is set.
