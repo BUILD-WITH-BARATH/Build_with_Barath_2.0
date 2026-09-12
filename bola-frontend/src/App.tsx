@@ -797,7 +797,11 @@ export default function App() {
                   <div className="text-[9px] font-mono uppercase font-semibold text-cyber-textMuted mb-2 tracking-wider">
                     EVENT TYPE LEGEND
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] font-mono">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                      <span className="text-slate-300">Quarantine Timer</span>
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
                       <span className="text-slate-300">Blocked</span>
@@ -848,6 +852,7 @@ export default function App() {
               ) : (
                 <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[640px] pr-1">
                   {events.map((ev) => {
+                    const isTimer = ev.event_type === 'quarantine_timer' || ev.record_id?.includes('timer') || ev.record_id?.includes('quarantine');
                     const isBlocked = ev.outcome === 'blocked';
                     const isDenied = ev.outcome === 'denied';
                     const is404 = ev.event_type === '404_probe' || ev.record_id?.includes('404') || ev.record_id?.startsWith('record_') || ev.record_id?.startsWith('item_');
@@ -856,7 +861,9 @@ export default function App() {
                       <div
                         key={ev.id}
                         className={`p-3 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
-                          isBlocked
+                          isTimer
+                            ? 'bg-cyan-950/25 border-cyan-500/50 shadow-lg shadow-cyan-500/10'
+                            : isBlocked
                             ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
                             : isCanary
                             ? 'bg-pink-900/20 border-pink-500/50 shadow-lg shadow-pink-500/10'
@@ -870,7 +877,7 @@ export default function App() {
                         <div className="flex items-center justify-between mb-1.5">
                           <div className="flex items-center gap-2">
                             <span className={`w-1.5 h-1.5 rounded-full ${
-                              isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
+                              isTimer ? 'bg-cyan-400 animate-pulse' : isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
                             }`}></span>
                             <span className="font-bold text-slate-200">{ev.subject_id}</span>
                             {ev.record_id !== undefined && (
@@ -879,7 +886,9 @@ export default function App() {
                           </div>
                           <span
                             className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                              isBlocked
+                              isTimer
+                                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                                : isBlocked
                                 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                                 : isCanary
                                 ? 'bg-pink-500/20 text-pink-300 border border-pink-500/40'
@@ -890,7 +899,7 @@ export default function App() {
                                 : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                             }`}
                           >
-                            {isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? '404 PROBE' : ev.outcome}
+                            {isTimer ? '⏱️ QUARANTINE' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? '404 PROBE' : ev.outcome}
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">

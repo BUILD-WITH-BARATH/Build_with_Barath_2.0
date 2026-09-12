@@ -2541,7 +2541,8 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
             "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') AND ("
             "  detector_decision IN ('block', 'alert') OR "
             "  outcome IN ('blocked', 'denied') OR "
-            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%'"
+            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR "
+            "  record_id LIKE '%timer%' OR record_id LIKE '%quarantine%'"
             ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
     timeline = []
     for row in rows:
@@ -2560,6 +2561,8 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
 def _classify_event(record_id: str, decision: str) -> str:
     """Classify event type for timeline display."""
     rec = str(record_id).lower()
+    if "timer" in rec or "quarantine" in rec:
+        return "quarantine_timer"
     if decision == "block":
         return "blocked_access"
     if "canary" in rec:
@@ -2569,23 +2572,67 @@ def _classify_event(record_id: str, decision: str) -> str:
     return "denied_access"
 
 @app.get("/lockout-status/{subject}")
-def get_lockout_status(subject: str) -> dict:
-    """Returns lockout timer status for a subject (strike count, time remaining)."""
+def get_lockout_status(subject: str, x_api_key: str | None = Header(default=None), tenant: str | None = None) -> dict:
+    """Returns lockout timer status for a subject (strike count, time remaining, expiry timestamp)."""
     now = time.time()
     try:
-        # Get strike count for demo tenant
-        strike_count = engine.get_strike_count(DEMO_TENANT_ID, subject, now)
+        target_tenant = DEMO_TENANT_ID
+        if x_api_key:
+            try:
+                with db() as c:
+                    t_row = c.execute("SELECT id FROM tenants WHERE api_key_hash = %s", (hash_api_key(x_api_key),)).fetchone()
+                    if t_row:
+                        target_tenant = t_row["id"]
+            except Exception:
+                pass
+        elif tenant:
+            target_tenant = tenant
+        else:
+            # Check if subject is actively blocked in ANY tenant
+            with db() as c:
+                t_row = c.execute(
+                    "SELECT tenant_id FROM risk_blocks WHERE subject = %s AND blocked_until > %s ORDER BY blocked_until DESC LIMIT 1",
+                    (subject, now)
+                ).fetchone()
+                if t_row:
+                    target_tenant = t_row["tenant_id"]
 
-        # Get last strike time to calculate remaining lockout
-        with db() as c:
-            last_strike = c.execute(
-                "SELECT at FROM risk_strikes WHERE tenant_id = %s AND subject = %s "
-                "ORDER BY at DESC LIMIT 1",
-                (DEMO_TENANT_ID, subject)
-            ).fetchone()
+        # Check blocked_until in target tenant
+        blocked_until = engine.blocked_until(target_tenant, subject)
+        if blocked_until <= now:
+            # Fallback: check if actively blocked in ANY tenant
+            with db() as c:
+                b_row = c.execute(
+                    "SELECT tenant_id, blocked_until FROM risk_blocks WHERE subject = %s AND blocked_until > %s ORDER BY blocked_until DESC LIMIT 1",
+                    (subject, now)
+                ).fetchone()
+                if b_row:
+                    target_tenant = b_row["tenant_id"]
+                    blocked_until = b_row["blocked_until"]
+
+        strike_count = engine.get_strike_count(target_tenant, subject, now)
+
+        if blocked_until > now:
+            remaining = max(0, int(blocked_until - now))
+            is_locked = remaining > 0
+            lockout_type = "permanent_ban" if strike_count >= 3 else ("hard_lockout" if strike_count == 2 else "soft_lockout")
+            lockout_duration = 120.0 if strike_count <= 1 else (1800.0 if strike_count == 2 else 315360000.0)
+            return {
+                "subject": subject,
+                "tenant_id": target_tenant,
+                "strike_count": max(1, strike_count),
+                "is_locked": is_locked,
+                "lockout_type": lockout_type,
+                "lockout_duration_seconds": int(lockout_duration),
+                "lockout_remaining_seconds": remaining,
+                "lockout_expires_at": int(blocked_until),
+                "message": f"Locked for {remaining} more seconds"
+            }
 
         if strike_count == 0:
             return {
+                "subject": subject,
+                "tenant_id": target_tenant,
                 "strike_count": 0,
                 "is_locked": False,
                 "lockout_remaining_seconds": 0,
@@ -2593,48 +2640,19 @@ def get_lockout_status(subject: str) -> dict:
                 "lockout_duration_seconds": 0
             }
 
-        if strike_count >= 3:
-            return {
-                "strike_count": 3,
-                "is_locked": True,
-                "lockout_type": "permanent_ban",
-                "lockout_remaining_seconds": -1,
-                "lockout_expires_at": None,
-                "message": "Subject is permanently banned"
-            }
-
-        # Calculate lockout expiration based on strike count
-        if last_strike:
-            last_strike_time = last_strike["at"]
-            if strike_count == 1:
-                lockout_duration = 120.0  # 2 minutes
-            elif strike_count == 2:
-                lockout_duration = 1800.0  # 30 minutes
-            else:
-                lockout_duration = 0
-
-            lockout_expires_at = last_strike_time + lockout_duration
-            remaining = max(0, lockout_expires_at - now)
-
-            return {
-                "strike_count": strike_count,
-                "is_locked": remaining > 0,
-                "lockout_type": "soft_lockout" if strike_count == 1 else "hard_lockout",
-                "lockout_duration_seconds": int(lockout_duration),
-                "lockout_remaining_seconds": int(remaining),
-                "lockout_expires_at": lockout_expires_at,
-                "message": f"Locked for {int(remaining)} more seconds"
-            }
-
         return {
+            "subject": subject,
+            "tenant_id": target_tenant,
             "strike_count": strike_count,
             "is_locked": False,
             "lockout_remaining_seconds": 0,
-            "lockout_expires_at": None
+            "lockout_expires_at": None,
+            "message": "Quarantine period has expired"
         }
     except Exception as e:
         logger.warning(f"Error getting lockout status: {str(e)}")
         return {
+            "subject": subject,
             "strike_count": 0,
             "is_locked": False,
             "error": str(e)
@@ -2813,6 +2831,20 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     now_ts = time.time()
     blocked_until = engine.blocked_until(tenant_id, subject)
     remaining = int(blocked_until - now_ts) if blocked_until > now_ts else (120 if final_decision == "block" else 0)
+    expires_at = int(blocked_until) if blocked_until > now_ts else (int(now_ts + remaining) if final_decision == "block" else None)
+
+    if final_decision == "block":
+        expiry_str = time.strftime("%H:%M:%S UTC", time.gmtime(expires_at or (now_ts + remaining)))
+        record_audit(
+            tenant_id,
+            subject,
+            "quarantine_timer",
+            "TIMER_LOCKOUT",
+            "block",
+            "blocked",
+            [f"Quarantine cooldown timer active: {remaining}s remaining (Expires at {expiry_str}). Navigation channels quarantined."]
+        )
+
     return {
         "decision": final_decision,
         "score": score,
@@ -2820,7 +2852,29 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "signals": signals,
         "explanations": detector_explanations,
         "lockout_remaining_s": remaining,
+        "lockout_expires_at": expires_at,
     }
+
+
+@app.post("/v1/audit/timer-log")
+def log_timer_audit(payload: dict, tenant_id: str = Depends(get_tenant_from_api_key)) -> dict:
+    """Explicit endpoint to record quarantine countdown status into the audit ledger."""
+    subject = str(payload.get("subject", "unknown"))
+    remaining = int(payload.get("remaining_seconds", 0))
+    expires_at = payload.get("expires_at")
+    strike_count = int(payload.get("strike_count", 1))
+    reason = str(payload.get("reason", "Quarantine cooldown active"))
+    expiry_str = time.strftime("%H:%M:%S UTC", time.gmtime(expires_at)) if expires_at else "imminent"
+    record_audit(
+        tenant_id,
+        subject,
+        "quarantine_timer",
+        "TIMER_SYNC",
+        "block",
+        "blocked",
+        [f"Quarantine cooldown timer: {remaining}s remaining (Strike {strike_count}/3, Expires at {expiry_str}). {reason}"]
+    )
+    return {"status": "ok", "subject": subject, "remaining_seconds": remaining}
 
 
 @app.post("/v1/authorize-batch")
