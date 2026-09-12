@@ -138,10 +138,20 @@ export default function App() {
     setTimeout(() => setActiveBtn(null), 300);
     setSimRunning('RESET');
     try {
+      // Reset backend database
       await fetch(`${API_BASE}/reset`, { method: 'POST' }).catch(() => null);
+
+      // Clear frontend state completely
       setRiskSubject('alice');
       setSubjectInput('alice');
       setSimVerdict(null);
+      setEvents([]);  // Clear audit timeline
+      setConfig(null);
+      setStats(null);
+      setRisk(null);
+      setOnline(null);
+
+      // Reload all data fresh
       await Promise.all([refreshPassive(), fetchRisk('alice')]);
     } catch {
       // ignore
