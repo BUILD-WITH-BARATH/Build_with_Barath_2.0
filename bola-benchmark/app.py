@@ -2568,6 +2568,79 @@ def _classify_event(record_id: str, decision: str) -> str:
         return "404_probe"
     return "denied_access"
 
+@app.get("/lockout-status/{subject}")
+def get_lockout_status(subject: str) -> dict:
+    """Returns lockout timer status for a subject (strike count, time remaining)."""
+    now = time.time()
+    try:
+        # Get strike count for demo tenant
+        strike_count = engine.get_strike_count(DEMO_TENANT_ID, subject, now)
+
+        # Get last strike time to calculate remaining lockout
+        with db() as c:
+            last_strike = c.execute(
+                "SELECT at FROM risk_strikes WHERE tenant_id = %s AND subject = %s "
+                "ORDER BY at DESC LIMIT 1",
+                (DEMO_TENANT_ID, subject)
+            ).fetchone()
+
+        if strike_count == 0:
+            return {
+                "strike_count": 0,
+                "is_locked": False,
+                "lockout_remaining_seconds": 0,
+                "lockout_expires_at": None,
+                "lockout_duration_seconds": 0
+            }
+
+        if strike_count >= 3:
+            return {
+                "strike_count": 3,
+                "is_locked": True,
+                "lockout_type": "permanent_ban",
+                "lockout_remaining_seconds": -1,
+                "lockout_expires_at": None,
+                "message": "Subject is permanently banned"
+            }
+
+        # Calculate lockout expiration based on strike count
+        if last_strike:
+            last_strike_time = last_strike["at"]
+            if strike_count == 1:
+                lockout_duration = 120.0  # 2 minutes
+            elif strike_count == 2:
+                lockout_duration = 1800.0  # 30 minutes
+            else:
+                lockout_duration = 0
+
+            lockout_expires_at = last_strike_time + lockout_duration
+            remaining = max(0, lockout_expires_at - now)
+
+            return {
+                "strike_count": strike_count,
+                "is_locked": remaining > 0,
+                "lockout_type": "soft_lockout" if strike_count == 1 else "hard_lockout",
+                "lockout_duration_seconds": int(lockout_duration),
+                "lockout_remaining_seconds": int(remaining),
+                "lockout_expires_at": lockout_expires_at,
+                "message": f"Locked for {int(remaining)} more seconds"
+            }
+
+        return {
+            "strike_count": strike_count,
+            "is_locked": False,
+            "lockout_remaining_seconds": 0,
+            "lockout_expires_at": None
+        }
+    except Exception as e:
+        logger.warning(f"Error getting lockout status: {str(e)}")
+        return {
+            "strike_count": 0,
+            "is_locked": False,
+            "error": str(e)
+        }
+
+
 @app.get("/risk/{subject}")
 def get_risk(subject: str) -> dict:
     now = time.time()
@@ -2737,12 +2810,16 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         dispatch_soc_alert(tenant_id, subject, resource_id, score, category, signals)
 
     final_decision = "block" if decision == "block" else ("allow" if authorized else "deny")
+    now_ts = time.time()
+    blocked_until = engine.blocked_until(tenant_id, subject)
+    remaining = int(blocked_until - now_ts) if blocked_until > now_ts else (120 if final_decision == "block" else 0)
     return {
         "decision": final_decision,
         "score": score,
         "category": category,
         "signals": signals,
         "explanations": detector_explanations,
+        "lockout_remaining_s": remaining,
     }
 
 

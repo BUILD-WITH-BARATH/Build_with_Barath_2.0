@@ -53,6 +53,16 @@ export interface AuditEvent {
   event_type?: string;
 }
 
+export interface LockoutStatus {
+  strike_count: number;
+  is_locked: boolean;
+  lockout_type?: string;
+  lockout_duration_seconds?: number;
+  lockout_remaining_seconds: number;
+  lockout_expires_at?: number;
+  message?: string;
+}
+
 export async function getConfig(): Promise<ConfigResp> {
   const res = await fetch(`${API_BASE}/config`);
   if (!res.ok) throw new Error(`config: ${res.status}`);
@@ -68,6 +78,12 @@ export async function getStats(): Promise<StatsResp> {
 export async function getRisk(subject: string): Promise<RiskResp> {
   const res = await fetch(`${API_BASE}/risk/${encodeURIComponent(subject)}`);
   if (!res.ok) throw new Error(`risk: ${res.status}`);
+  return res.json();
+}
+
+export async function getLockoutStatus(subject: string): Promise<LockoutStatus> {
+  const res = await fetch(`${API_BASE}/lockout-status/${encodeURIComponent(subject)}`);
+  if (!res.ok) throw new Error(`lockout: ${res.status}`);
   return res.json();
 }
 
