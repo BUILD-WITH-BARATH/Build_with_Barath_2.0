@@ -1,0 +1,51 @@
+﻿services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cyberaccess-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cyberaccess
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cyberaccess"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./bola-benchmark
+      dockerfile: Dockerfile
+    container_name: cyberaccess-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:postgrespassword@postgres:5432/cyberaccess
+      APP_ENV: dev
+      DEMO_MODE: "true"
+      FRONTEND_ORIGIN: "*"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./bola-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    container_name: cyberaccess-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

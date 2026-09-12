@@ -1,0 +1,57 @@
+﻿services:
+  # 1. FastAPI Behavioral Risk Engine & Multi-Tenant Product API
+  - type: web
+    name: bola-backend-api
+    runtime: python
+    rootDir: bola-benchmark
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
+      # No Render-managed Postgres here - Render's free plan caps free
+      # Postgres at one per account. Using an external Neon (or Supabase)
+      # connection string avoids that cap entirely and doesn't expire after
+      # 90 days like Render's free Postgres does. Set the actual value
+      # manually in the Render dashboard after first deploy.
+      - key: DATABASE_URL
+        sync: false
+      # app.py refuses to boot in prod mode until JWT_SECRET/DEMO_PASSWORD/ADMIN_PASSWORD/
+      # TENANT_SIGNUP_KEY are all overridden from their dev-only defaults, and until
+      # FRONTEND_ORIGIN is set.
+      - key: APP_ENV
+        value: prod
+      - key: JWT_SECRET
+        generateValue: true
+      - key: TENANT_SIGNUP_KEY
+        generateValue: true
+      # Deployer sets these manually in the Render dashboard after first deploy -
+      # generateValue would make them unguessable, defeating a public demo's purpose.
+      # Must NOT equal "changeme123" / "admin_changeme123" or the app refuses to boot.
+      - key: DEMO_PASSWORD
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Render assigns the frontend's real URL only after its first deploy - set this
+      # manually in the dashboard afterward (e.g. https://bola-frontend-dashboard.onrender.com).
+      # Must include the https:// scheme; a bare hostname will never match an Origin header.
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+  # 2. React Security & Threat Intelligence Frontend
+  - type: web
+    name: bola-frontend-dashboard
+    runtime: static
+    rootDir: bola-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: bola-backend-api
+          property: host
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

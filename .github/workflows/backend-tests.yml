@@ -1,0 +1,55 @@
+name: backend tests
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "bola-benchmark/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "bola-benchmark/**"
+      - ".github/workflows/backend-tests.yml"
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bola-benchmark
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bola
+          POSTGRES_PASSWORD: bola
+          POSTGRES_DB: bola_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bola"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Every schema migration in init_schema() runs its own isolated
+      # connection/transaction (see app.py), so a fresh database from the
+      # postgres:16 service image boots the full schema on first request -
+      # no separate migration step needed here.
+      DATABASE_URL: postgresql://bola:bola@localhost:5432/bola_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.8"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest -q
