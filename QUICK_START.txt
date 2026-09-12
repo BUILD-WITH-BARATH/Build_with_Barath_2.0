@@ -1,0 +1,145 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  CYBERACCESS BOLA DEFENSE - QUICK START                    ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+🚀 RUN THE FULL STACK (3 COMMANDS)
+══════════════════════════════════════════════════════════════════════════════
+
+Option A: Docker Compose (Recommended - All-in-One)
+────────────────────────────────────────────────────────
+$ cd D:\Build_with_Barath_2.0
+$ docker compose up --build
+
+✓ Starts: PostgreSQL (5432) + FastAPI Backend (8000) + React Frontend (5173)
+✓ Wait for: "Uvicorn running on..." and "nginx: ... is running"
+✓ Open: http://localhost:5173
+
+Option B: Manual Local Development (3 Terminals)
+────────────────────────────────────────────────────────
+
+Terminal 1 - Backend:
+$ cd bola-benchmark
+$ .\.venv\Scripts\activate.bat    (Windows)
+$ set DEMO_MODE=true && set APP_ENV=dev
+$ uvicorn app:app --reload --port 8000
+✓ Should see: "Uvicorn running on http://127.0.0.1:8000"
+
+Terminal 2 - Frontend:
+$ cd bola-frontend
+$ npm run dev
+✓ Should see: "VITE v8.2.2 ready in ... ➜ Local: http://localhost:5173/"
+
+Terminal 3 - Lost-foundbyKM Integration (Optional):
+$ cd Lost-foundbyKM
+$ .\.venv\Scripts\activate.bat    (Windows)
+$ python manage.py runserver 0.0.0.0:8001
+✓ Should see: "Starting development server at http://127.0.0.1:8001/"
+
+═══════════════════════════════════════════════════════════════════════════════
+
+📋 QUICK VERIFICATION (Test Each Component)
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Backend Health Check
+   $ curl http://localhost:8000/health
+   ✓ Response: { "status": "healthy", "version": "1.1.1" }
+
+2. Frontend Dashboard
+   ✓ Open http://localhost:5173 in browser
+   ✓ Should load without errors
+   ✓ Check DevTools Network tab - XHR requests should succeed
+
+3. API Endpoint Test
+   $ curl http://localhost:8000/config
+   ✓ Response: { "short_window": 30, "long_window": 3600, ... }
+
+4. BOLA Attack Simulation (in Dashboard)
+   ✓ Type subject: "alice"
+   ✓ Click "Assess Risk"
+   ✓ Should show risk score and signals
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🔐 LOST-FOUND INTEGRATION TEST (After starting Lost-foundbyKM)
+═══════════════════════════════════════════════════════════════════════════════
+
+$ cd Lost-foundbyKM
+$ python test_cyberaccess_defense.py
+
+Expected Output:
+  [TEST 1] Authorized User: Alice accesses her own claim...
+    [OK] Access GRANTED: Alice successfully viewed her claim (HTTP 200).
+  [TEST 2] Attacker probes single unowned item edit page...
+    [DENIED] Layer 1 Gate Denied: Attacker redirected away without data leak.
+  [TEST 3] Simulating Rapid BOLA Enumeration Attack...
+    [ALERT] THREAT NEUTRALIZED! CyberAccess 3-Strike Lockout triggered!
+  [TEST 4] Testing Canary Honeypot Trap...
+    [ALERT] CANARY TRIPPED: Instant lockout response rendered with HTTP 403.
+  [SUCCESS] ALL CYBERACCESS INTEGRATION TESTS PASSED SUCCESSFULLY!
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🐛 TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Frontend says "API Unreachable"
+→ Verify backend running: curl http://localhost:8000/health
+→ Check VITE_API_BASE_URL in bola-frontend/.env
+
+Backend returns 401 Unauthorized
+→ Get fresh token: curl -X POST http://localhost:8000/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"subject":"security_admin","password":"admin_changeme123"}'
+
+Lost-foundbyKM needs CyberAccess API
+→ Copy Lost-foundbyKM/.env.example → .env
+→ Set CYBERACCESS_API_KEY and CYBERACCESS_API_URL
+
+Docker says "Dockerfile not found"
+→ Already fixed! Dockerfile created from Dockerfile.local (commit: d794c2e)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+📊 WHAT WAS JUST FIXED
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Integration Issues Resolved:
+  1. Created missing Dockerfile for docker-compose compatibility
+  2. Fixed API URL from localhost:8000 → backend:8000 (Docker networking)
+  3. Removed all hardcoded secrets in Lost-foundbyKM (now env vars)
+  4. Added comprehensive integration test guide
+  5. Verified all 6 API endpoints exist and CORS is configured
+
+✅ Commits:
+  • d794c2e - fix(integration): resolve frontend-backend connectivity
+  • eace565 - docs: add comprehensive integration test guide
+  • 3de6166 - refactor(cyberaccess): remove hardcoding (side agent)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+📚 FULL DOCUMENTATION
+═══════════════════════════════════════════════════════════════════════════════
+
+See INTEGRATION_TEST.md for:
+  • Detailed startup instructions
+  • All API endpoint test commands
+  • CORS verification
+  • Environment variable documentation
+  • Architecture diagrams
+  • Extended troubleshooting
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🎯 NEXT STEPS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Choose startup method (Docker or Manual)
+2. Run the full stack
+3. Verify frontend loads at http://localhost:5173
+4. Test API endpoints using curl commands in INTEGRATION_TEST.md
+5. Run Lost-foundbyKM tests: python test_cyberaccess_defense.py
+6. Simulate BOLA attacks in the dashboard
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Questions? Check INTEGRATION_TEST.md for detailed troubleshooting guide.
