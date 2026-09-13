@@ -299,7 +299,7 @@ export default function App() {
               </div>
               <p className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-400 font-medium mt-1 select-none flex items-center gap-1.5">
                 <span className="w-1 h-1 rounded-full bg-cyber-accent animate-pulse"></span>
-                DETERMINISTIC AUTH <span className="text-neutral-600">•</span> BEHAVIORAL DEFENSE
+                BOLA DETECTION <span className="text-neutral-600">•</span> REAL-TIME DEFENSE
               </p>
             </div>
           </div>
@@ -310,7 +310,7 @@ export default function App() {
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md border border-cyber-border bg-[#0a0d14]/70 font-mono text-[11px] text-cyber-textMuted">
               <span className={`w-2 h-2 rounded-full ${online ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`}></span>
               <span className="tracking-wider text-slate-400">
-                ENGINE HEARTBEAT: <span className={online ? 'text-cyan-400 font-semibold' : 'text-slate-500 font-semibold'}>{online ? 'SYNCED' : 'AWAITING'}</span>
+                STATUS: <span className={online ? 'text-cyan-400 font-semibold' : 'text-slate-500 font-semibold'}>{online ? 'ONLINE' : 'OFFLINE'}</span>
               </span>
               <span className="text-neutral-600">|</span>
               <span className="text-slate-400">UTC {utcTime || '12:00:00'}</span>
@@ -378,7 +378,7 @@ export default function App() {
                     </h2>
                   </div>
                   <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
-                    Real-time Telemetry
+                    Live Stats
                   </span>
                 </div>
 
@@ -395,7 +395,7 @@ export default function App() {
                       <div className="font-mono text-[10px] uppercase font-semibold text-cyber-textMuted tracking-wider">
                         ACTIVE SUBJECTS
                       </div>
-                      <span className="font-mono text-[8px] text-slate-500">Users generating recent API requests</span>
+                      <span className="font-mono text-[8px] text-slate-500">Users with recent activity</span>
                     </div>
                   </div>
 
@@ -458,7 +458,7 @@ export default function App() {
                   </h2>
                 </div>
                 <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
-                  Engine Parameters
+                  Settings
                 </span>
               </div>
 
@@ -696,12 +696,12 @@ export default function App() {
                   </h2>
                 </div>
                 <span className="inline-flex items-center px-2.5 py-0.5 rounded text-[9px] font-mono tracking-wider font-semibold text-rose-400 bg-rose-950/40 border border-rose-900/60 shadow-glowRed/20">
-                  TACTICAL SUITE
+                  ATTACK TESTS
                 </span>
               </div>
 
               <p className="font-mono text-[11px] text-cyber-textMuted mb-3">
-                Trigger simulated attack payloads to test behavioral engine defenses:
+                Run attack tests to see how the system defends:
               </p>
 
               <div className="grid grid-cols-2 gap-3 mb-3">
@@ -736,7 +736,7 @@ export default function App() {
                       {simRunning === 'RAPID BOLA' ? 'RUNNING...' : 'RAPID BOLA'}
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">High Velocity Probe</span>
+                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Rapid Sequential Access</span>
                 </button>
 
                 <button
@@ -753,7 +753,7 @@ export default function App() {
                       {simRunning === 'LOW & SLOW' ? 'RUNNING...' : 'LOW & SLOW'}
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-amber-500/70 mt-1">Evasive Timing Vector</span>
+                  <span className="block font-mono text-[9px] text-amber-500/70 mt-1">Slow Evasion Attack</span>
                 </button>
 
                 <button
@@ -770,7 +770,7 @@ export default function App() {
                       {simRunning === 'COORDINATED' ? 'RUNNING...' : 'COORDINATED'}
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Distributed Attack</span>
+                  <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Coordinated Multi-User Attack</span>
                 </button>
 
                 <button
@@ -787,7 +787,7 @@ export default function App() {
                       MALICIOUS URLS
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-violet-400/70 mt-1">Form Injection Attack</span>
+                  <span className="block font-mono text-[9px] text-violet-400/70 mt-1">Harmful URLs in Forms</span>
                 </button>
 
                 <button
@@ -804,7 +804,7 @@ export default function App() {
                       ENUMERATION
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-fuchsia-400/70 mt-1">Multi-URL Bombardment</span>
+                  <span className="block font-mono text-[9px] text-fuchsia-400/70 mt-1">Rapid URL Enumeration</span>
                 </button>
 
                 <button
@@ -821,7 +821,7 @@ export default function App() {
                       MIXED ENDPOINTS
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-cyan-400/70 mt-1">Pattern Obfuscation</span>
+                  <span className="block font-mono text-[9px] text-cyan-400/70 mt-1">Attacks Across Endpoints</span>
                 </button>
 
                 <button
@@ -838,7 +838,7 @@ export default function App() {
                       CANARY PROBE
                     </span>
                   </div>
-                  <span className="block font-mono text-[9px] text-pink-400/70 mt-1">Honeypot Detection</span>
+                  <span className="block font-mono text-[9px] text-pink-400/70 mt-1">Trap URL Detection</span>
                 </button>
               </div>
 
