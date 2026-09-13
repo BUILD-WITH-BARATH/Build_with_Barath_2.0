@@ -356,7 +356,8 @@ def init_schema() -> None:
                 "authorization" TEXT,
                 detector_decision TEXT NOT NULL,
                 outcome TEXT NOT NULL,
-                explanation TEXT NOT NULL
+                explanation TEXT NOT NULL,
+                risk_score DOUBLE PRECISION
             );
             CREATE TABLE IF NOT EXISTS resource_nodes (
                 tenant_id TEXT NOT NULL,
@@ -648,7 +649,8 @@ def trigger_canary_trap(tenant_id: str, subject: str, record_id: str, endpoint: 
                        signals=["canary_honeypot_triggered", "strike_3_permanent_ban_approved"])
     record_audit(
         tenant_id, subject, record_id, None, "block", "blocked_canary",
-        [f"CANARY HONEYPOT TRIGGERED: Decoy '{record_id}' accessed by subject '{subject}'. Permanent firewall ban enforced."]
+        [f"CANARY HONEYPOT TRIGGERED: Decoy '{record_id}' accessed by subject '{subject}'. Permanent firewall ban enforced."],
+        risk_score=100.0
     )
 
 
@@ -712,13 +714,13 @@ def authorization_context(tenant_id: str, subject: str, record_id: int | str, ac
 
 
 def record_audit(tenant_id: str, subject: str, record_id: int | str, authorization: str | None,
-                  decision: str, outcome: str, explanations: list[str]) -> None:
+                  decision: str, outcome: str, explanations: list[str], risk_score: float = 0.0) -> None:
     now_ts = time.time()
     with db() as c:
         c.execute(
             'INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "authorization", '
-            "detector_decision, outcome, explanation) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (tenant_id, now_ts, subject, str(record_id), authorization, decision, outcome, " | ".join(explanations)),
+            "detector_decision, outcome, explanation, risk_score) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (tenant_id, now_ts, subject, str(record_id), authorization, decision, outcome, " | ".join(explanations), risk_score),
         )
     try:
         broadcast_sse_event("audit_event", {
@@ -729,6 +731,7 @@ def record_audit(tenant_id: str, subject: str, record_id: int | str, authorizati
             "detector_decision": decision,
             "outcome": outcome,
             "explanation": explanations,
+            "risk_score": risk_score,
             "tenant_id": tenant_id,
         })
     except Exception:
@@ -1211,7 +1214,8 @@ class BodyObjectReferenceMiddleware(BaseHTTPMiddleware):
                                     engine.evaluate(tenant_id, subject, cand_id, allowed=False, endpoint=f"body_ref:{field_name}")
                                     record_audit(
                                         tenant_id, subject, cand_id, None, "deny", "denied_body_reference",
-                                        [f"Unauthorized foreign object ID '{cand_id}' referenced in body field '{field_name}'."]
+                                        [f"Unauthorized foreign object ID '{cand_id}' referenced in body field '{field_name}'."],
+                                        risk_score=100.0
                                     )
                     except Exception:
                         pass
@@ -1637,7 +1641,7 @@ def get_record(record_id: str, request: Request, response: Response,
 
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
-        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "signals": signals,
                                          "explanations": explanations, "score": score, "category": category,
@@ -1645,14 +1649,14 @@ def get_record(record_id: str, request: Request, response: Response,
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     if authorization is None:
-        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     with db() as c:
         row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
                          (tenant_id, str(record_id))).fetchone()
-    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations)
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations, risk_score=score)
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
             "score": score, "category": category}
@@ -1687,12 +1691,12 @@ def update_record(
     response.headers["X-Risk-Category"] = category
 
     if decision == "block":
-        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
 
     if authorization is None:
-        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "No write authorization for record", "score": score})
 
     new_data = payload.get("data")
@@ -1707,7 +1711,7 @@ def update_record(
         row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
                         (tenant_id, str(record_id))).fetchone()
 
-    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_write", explanations)
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_write", explanations, risk_score=score)
     return {"status": "updated", "record": dict(row), "score": score}
 
 
@@ -1736,12 +1740,12 @@ def patch_record(
     response.headers["X-Risk-Category"] = category
 
     if decision == "block":
-        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
 
     if authorization is None:
-        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "No patch authorization for record", "score": score})
 
     with db() as c:
@@ -1755,7 +1759,7 @@ def patch_record(
         updated_row = c.execute("SELECT id, owner_id, data FROM records WHERE tenant_id = %s AND id = %s",
                                 (tenant_id, str(record_id))).fetchone()
 
-    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_patch", explanations)
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_patch", explanations, risk_score=score)
     return {"status": "patched", "record": dict(updated_row), "score": score}
 
 
@@ -1783,18 +1787,18 @@ def delete_record(
     response.headers["X-Risk-Category"] = category
 
     if decision == "block":
-        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "score": score})
 
     if authorization is None:
-        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations)
+        record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "Only record owner can delete this record", "score": score})
 
     with db() as c:
         c.execute("DELETE FROM records WHERE tenant_id = %s AND id = %s", (tenant_id, str(record_id)))
 
-    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_delete", explanations)
+    record_audit(tenant_id, subject, record_id, authorization, decision, "allowed_delete", explanations, risk_score=score)
     return {"status": "deleted", "record_id": record_id, "score": score}
 
 
@@ -1898,11 +1902,11 @@ def access_hierarchical_chain(
 
     if not valid or decision == "block":
         outcome = "blocked" if decision == "block" else "denied"
-        record_audit(tenant_id, subject, leaf_id, None, decision, outcome, all_explanations)
+        record_audit(tenant_id, subject, leaf_id, None, decision, outcome, all_explanations, risk_score=score)
         raise HTTPException(403, detail={"outcome": outcome, "reason": "Hierarchical validation failed",
                                          "violations": explanations, "score": score})
 
-    record_audit(tenant_id, subject, leaf_id, "authorized", decision, "allowed", all_explanations)
+    record_audit(tenant_id, subject, leaf_id, "authorized", decision, "allowed", all_explanations, risk_score=score)
     return {"outcome": "allowed", "leaf": leaf_data, "chain_length": len(chain), "score": score}
 
 
@@ -2037,7 +2041,7 @@ def create_job(
         decision, signals, _unseen, score, category = engine.evaluate(
             tenant_id, subject, resource_id, allowed=False, endpoint="async_jobs"
         )
-        record_audit(tenant_id, subject, resource_id, None, decision, "denied_job", access["explanations"])
+        record_audit(tenant_id, subject, resource_id, None, decision, "denied_job", access["explanations"], risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "No authorization to enqueue job for requested resource", "score": score})
 
     job_id = f"job_{secrets.token_hex(8)}"
@@ -2099,7 +2103,7 @@ def trigger_worker_execution(
     if not (is_owner or is_admin):
         engine.evaluate(tenant_id, subject, job_id, allowed=False, endpoint="async_jobs")
         record_audit(tenant_id, subject, job_id, None, "deny", "denied_job_execute",
-                     [f"Second-order BOLA prevented: '{subject}' attempted to execute a job owned by another subject/tenant."])
+                     [f"Second-order BOLA prevented: '{subject}' attempted to execute a job owned by another subject/tenant."], risk_score=100.0)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this job",
                                          "attack_type": "second_order_bola"})
     return execute_async_job(job_id)
@@ -2126,7 +2130,7 @@ def create_stored_reference(
     if access["authorization"] is None:
         engine.evaluate(tenant_id, subject, target_id, allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, subject, target_id, None, "deny", "denied_stored_bola_creation",
-                     ["Second-order BOLA violation: Cannot register reference to unauthorized resource."])
+                     ["Second-order BOLA violation: Cannot register reference to unauthorized resource."], risk_score=100.0)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented: Cannot store pointer to unowned resource",
                                          "attack_type": "second_order_bola"})
 
@@ -2167,7 +2171,7 @@ def trigger_stored_reference(
     if not (is_owner or is_admin):
         engine.evaluate(tenant_id, subject, ref["target_resource_id"], allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, subject, ref["target_resource_id"], None, "deny", "denied_stored_ref_cross_subject",
-                     [f"Second-order BOLA prevented: '{subject}' attempted to trigger a stored reference owned by another subject."])
+                     [f"Second-order BOLA prevented: '{subject}' attempted to trigger a stored reference owned by another subject."], risk_score=100.0)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this stored reference",
                                          "attack_type": "second_order_bola"})
 
@@ -2180,7 +2184,7 @@ def trigger_stored_reference(
             c.execute("UPDATE stored_references SET status = 'security_flagged' WHERE id = %s", (ref_id,))
         engine.evaluate(tenant_id, ref["subject_id"], target_id, allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, ref["subject_id"], target_id, None, "deny", "denied_stored_bola_consumption",
-                     ["Second-order BOLA detected at trigger time: authorization has lapsed or resource changed owners."])
+                     ["Second-order BOLA detected at trigger time: authorization has lapsed or resource changed owners."], risk_score=100.0)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented at consumption time",
                                          "ref_status": "security_flagged"})
 
@@ -2442,7 +2446,7 @@ class GraphQLQuery:
             tenant_id, subject, id, allowed=access["authorization"] is not None, endpoint="graphql"
         )
         if access["authorization"] is None or decision == "block":
-            record_audit(tenant_id, subject, id, None, decision, "denied_graphql", access["explanations"])
+            record_audit(tenant_id, subject, id, None, decision, "denied_graphql", access["explanations"], risk_score=score)
             raise PermissionError(f"Access denied to record '{id}': No object authorization")
 
         with db() as c:
@@ -2530,7 +2534,7 @@ def simulate_low_and_slow(request: Request, _guard: None = Depends(guard_demo_en
     for i in range(15):
         event_time = now - (3600) + (i * 240)
         engine.record_event(DEMO_TENANT_ID, subject, 50 + i, False, event_time)
-        record_audit(DEMO_TENANT_ID, subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"])
+        record_audit(DEMO_TENANT_ID, subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"], risk_score=50.0 + (i * 5))
 
     headers = _login_headers(client, subject)
     res = client.get("/records/66", headers=headers)
@@ -2787,7 +2791,7 @@ def approve_permanent_ban_endpoint(subject: str, identity: tuple[str, str, str] 
     caller, role, tenant_id = identity
     require_security_admin(role)
     engine.approve_permanent_ban(tenant_id, subject)
-    record_audit(tenant_id, subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin '{caller}' APPROVED Permanent Firewall Ban for '{subject}'"])
+    record_audit(tenant_id, subject, 0, "ADMIN_AUTHORITY", "block", "blocked", [f"Admin '{caller}' APPROVED Permanent Firewall Ban for '{subject}'"], risk_score=100.0)
     return {"status": "permanent_ban_approved", "subject": subject, "is_permanent": True}
 
 
