@@ -2994,7 +2994,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
 
     is_canary = str(resource_id).strip() in ("0", "999999", "canary_admin_vault") or endpoint == "canary_trap"
     is_admin = endpoint.startswith("admin_") or str(resource_id).startswith("privileged_admin") or endpoint in ("admin_login_probe", "admin_portal")
-    is_zero_tolerance = bool(is_canary or is_admin)
+    is_zero_tolerance = bool(is_canary)
 
     if not authorized:
         strike_now = time.time()
@@ -3002,18 +3002,21 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             decision = "block"
             score = 100.0
             category = "Attack"
-            sig = "canary_honeypot_triggered" if is_canary else "unauthorized_admin_access_attempt"
+            sig = "canary_honeypot_triggered"
             if sig not in signals:
                 signals.append(sig)
             lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
             if strike_sig not in signals:
                 signals.append(strike_sig)
             current_strikes = count
+            trial_count = 3
         elif trial_count >= 3:
             # 3rd unauthorized attempt in current cycle -> escalate to next strike tier!
             decision = "block"
             score = max(score, 95.0)
             category = "Attack"
+            if is_admin and "unauthorized_admin_access_attempt" not in signals:
+                signals.append("unauthorized_admin_access_attempt")
             if "unauthorized_trial_threshold_exceeded" not in signals:
                 signals.append("unauthorized_trial_threshold_exceeded")
             lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
@@ -3021,13 +3024,13 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
                 signals.append(strike_sig)
             current_strikes = count
         else:
-            # Trials 1 & 2: Warning & Alert window, do NOT block
+            # Trials 1 & 2: Warning & Alert window, STRICTLY DENIED (NEVER BLOCKED)
             decision = "deny"
             if trial_count == 1:
-                score = min(40.0, max(25.0, score))
+                score = 25.0
                 category = "Normal"
             elif trial_count == 2:
-                score = min(70.0, max(50.0, score))
+                score = 50.0
                 category = "High Risk"
                 if "repeated_unauthorized_trial" not in signals:
                     signals.append("repeated_unauthorized_trial")
