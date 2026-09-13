@@ -910,55 +910,57 @@ export default function App() {
                     return (
                       <div
                         key={ev.id}
-                        className={`p-3 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
+                        className={`p-2.5 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
                           isTimer
-                            ? 'bg-cyan-950/25 border-cyan-500/50 shadow-lg shadow-cyan-500/10'
+                            ? 'bg-cyan-950/25 border-cyan-500/50'
                             : isAdmin
-                            ? 'bg-red-950/40 border-red-500/70 shadow-lg shadow-red-500/20'
+                            ? 'bg-red-950/40 border-red-500/70'
                             : isBlocked
-                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50 shadow-glowRed/20'
+                            ? 'bg-cyber-crimsonMuted/20 border-cyber-crimson/50'
                             : isCanary
-                            ? 'bg-pink-900/20 border-pink-500/50 shadow-lg shadow-pink-500/10'
+                            ? 'bg-pink-900/20 border-pink-500/50'
                             : is404
-                            ? 'bg-violet-900/20 border-violet-500/50 shadow-lg shadow-violet-500/10'
+                            ? 'bg-violet-900/20 border-violet-500/50'
                             : isDenied
-                            ? 'bg-cyber-orangeMuted/20 border-cyber-orange/40 shadow-glowOrange/20'
-                            : 'bg-[#090c13] border-cyber-border hover:border-slate-700'
+                            ? 'bg-cyber-orangeMuted/20 border-cyber-orange/40'
+                            : 'bg-[#090c13] border-cyber-border'
                         }`}
                       >
-                        <div className="flex items-center justify-between mb-1.5">
-                          <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 flex-1">
                             <span className={`w-1.5 h-1.5 rounded-full ${
                               isTimer ? 'bg-cyan-400 animate-pulse' : isAdmin ? 'bg-red-500 animate-pulse' : isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
                             }`}></span>
-                            <span className="font-bold text-slate-200">{ev.subject_id}</span>
-                            {ev.record_id !== undefined && (
-                              <span className="text-cyber-textMuted text-[10px]">{ev.record_id}</span>
-                            )}
+                            <span className="font-bold text-slate-200 truncate">{ev.subject_id}</span>
                           </div>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                              isTimer
-                                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                                : isAdmin
-                                ? 'bg-red-500/30 text-red-200 border border-red-500/60'
-                                : isBlocked
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                                : isCanary
-                                ? 'bg-pink-500/20 text-pink-300 border border-pink-500/40'
-                                : is404
-                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
-                                : isDenied
-                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                                : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                            }`}
-                          >
-                            {isTimer ? '⏱️ QUARANTINE' : isAdmin ? '🛡️ ADMIN BREACH' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? '404 PROBE' : ev.outcome}
-                          </span>
+                          <span className="text-cyber-textMuted text-[9px] whitespace-nowrap ml-2">{timeAgo(ev.occurred_at)}</span>
                         </div>
-                        <div className="flex items-center justify-between text-[10px] text-cyber-textMuted pt-1 border-t border-cyber-border/40">
-                          <span>{ev.explanation || (is404 ? 'object enumeration detected' : 'access event')}</span>
-                          <span>{timeAgo(ev.occurred_at)}</span>
+                        <div className="flex items-center gap-2 mt-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider flex-shrink-0 ${
+                            isTimer
+                              ? 'bg-cyan-500/20 text-cyan-300'
+                              : isAdmin
+                              ? 'bg-red-500/30 text-red-200'
+                              : isBlocked
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : isCanary
+                              ? 'bg-pink-500/20 text-pink-300'
+                              : is404
+                              ? 'bg-violet-500/20 text-violet-300'
+                              : isDenied
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'bg-emerald-500/10 text-emerald-400'
+                          }`}>
+                            {isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
+                          </span>
+                          <span className="text-[9px] text-cyber-textMuted truncate flex-1">
+                            {isBlocked && ev.record_id?.includes('timer') ? `Strike ${ev.record_id?.match(/\d+/)?.[0] || '?'}` :
+                             is404 ? 'enum' :
+                             isCanary ? 'trap' :
+                             isAdmin ? 'portal' :
+                             isDenied ? 'denied' :
+                             'allowed'}
+                          </span>
                         </div>
                       </div>
                     );
