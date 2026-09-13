@@ -711,23 +711,6 @@ export default function App() {
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <button
                   disabled={simRunning !== null}
-                  onClick={() => runSim('NORMAL')}
-                  className={`btn-tactical group relative rounded-lg border border-slate-700/80 bg-gradient-to-b from-[#141b27] to-[#0c1018] p-3 text-center shadow-tactical hover:border-emerald-500/70 hover:shadow-glowEmerald/30 active:bg-neutral-800 disabled:opacity-50 ${
-                    activeBtn === 'NORMAL' ? 'ring-2 ring-emerald-500/60' : ''
-                  }`}
-                  type="button"
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></span>
-                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-slate-200 group-hover:text-emerald-300 transition-colors">
-                      {simRunning === 'NORMAL' ? 'RUNNING...' : 'NORMAL'}
-                    </span>
-                  </div>
-                  <span className="block font-mono text-[9px] text-cyber-textMuted mt-1">Standard Auth Flow</span>
-                </button>
-
-                <button
-                  disabled={simRunning !== null}
                   onClick={() => runSim('RAPID BOLA')}
                   className={`btn-tactical group relative rounded-lg border border-rose-800/80 bg-gradient-to-b from-rose-950/40 to-[#120b10] p-3 text-center shadow-glowRed/20 hover:border-rose-500 hover:shadow-glowRed active:bg-rose-900/40 disabled:opacity-50 ${
                     activeBtn === 'RAPID BOLA' ? 'ring-2 ring-rose-500/60' : ''
@@ -775,57 +758,6 @@ export default function App() {
                     </span>
                   </div>
                   <span className="block font-mono text-[9px] text-rose-400/70 mt-1">Coordinated Multi-User Attack</span>
-                </button>
-
-                <button
-                  disabled={simRunning !== null}
-                  onClick={() => runSim('URL_BLOCKING_1')}
-                  className={`btn-tactical group relative rounded-lg border border-violet-800/80 bg-gradient-to-b from-violet-950/40 to-[#15100f] p-3 text-center shadow-glowRed/20 hover:border-violet-500 hover:shadow-glowRed active:bg-violet-900/40 disabled:opacity-50 ${
-                    activeBtn === 'URL_BLOCKING_1' ? 'ring-2 ring-violet-500/60' : ''
-                  }`}
-                  type="button"
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-violet-500 shadow-[0_0_8px_#a78bfa]"></span>
-                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-violet-400 group-hover:text-violet-300 transition-colors">
-                      MALICIOUS URLS
-                    </span>
-                  </div>
-                  <span className="block font-mono text-[9px] text-violet-400/70 mt-1">Harmful URLs in Forms</span>
-                </button>
-
-                <button
-                  disabled={simRunning !== null}
-                  onClick={() => runSim('URL_BLOCKING_2')}
-                  className={`btn-tactical group relative rounded-lg border border-fuchsia-800/80 bg-gradient-to-b from-fuchsia-950/40 to-[#120b10] p-3 text-center shadow-glowRed/20 hover:border-fuchsia-500 hover:shadow-glowRed active:bg-fuchsia-900/40 disabled:opacity-50 ${
-                    activeBtn === 'URL_BLOCKING_2' ? 'ring-2 ring-fuchsia-500/60' : ''
-                  }`}
-                  type="button"
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-fuchsia-500 shadow-[0_0_8px_#f472b6]"></span>
-                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-fuchsia-400 group-hover:text-fuchsia-300 transition-colors">
-                      ENUMERATION
-                    </span>
-                  </div>
-                  <span className="block font-mono text-[9px] text-fuchsia-400/70 mt-1">Rapid URL Enumeration</span>
-                </button>
-
-                <button
-                  disabled={simRunning !== null}
-                  onClick={() => runSim('URL_BLOCKING_3')}
-                  className={`btn-tactical group relative rounded-lg border border-cyan-800/80 bg-gradient-to-b from-cyan-950/40 to-[#0d1418] p-3 text-center shadow-glowRed/20 hover:border-cyan-500 hover:shadow-glowRed active:bg-cyan-900/40 disabled:opacity-50 ${
-                    activeBtn === 'URL_BLOCKING_3' ? 'ring-2 ring-cyan-500/60' : ''
-                  }`}
-                  type="button"
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_8px_#06b6d4]"></span>
-                    <span className="font-mono text-xs font-bold uppercase tracking-wider text-cyan-400 group-hover:text-cyan-300 transition-colors">
-                      MIXED ENDPOINTS
-                    </span>
-                  </div>
-                  <span className="block font-mono text-[9px] text-cyan-400/70 mt-1">Attacks Across Endpoints</span>
                 </button>
 
                 <button
