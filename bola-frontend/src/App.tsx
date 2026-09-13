@@ -360,14 +360,14 @@ export default function App() {
       {/* END: MainHeader */}
 
       {/* BEGIN: DashboardLayout (Functional Command Grid) */}
-      <main className="flex-1 w-full p-5 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+      <main className="flex-1 w-full p-3 sm:p-4 md:p-5 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 md:gap-5">
         {/* ========================================================================= */}
         {/* COLUMN 1: POSTURE & ENGINE (Left Column - 3 cols) */}
         {/* ========================================================================= */}
-        <div className="lg:col-span-3 xl:col-span-3 flex flex-col gap-5">
+        <div className="lg:col-span-3 xl:col-span-3 flex flex-col gap-3 sm:gap-4 md:gap-5">
           {/* BEGIN: SecurityOverviewCard */}
           <ErrorBoundary label="Security Overview">
-            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative overflow-hidden shadow-tactical flex flex-col justify-between flex-1">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative overflow-hidden shadow-tactical flex flex-col justify-between flex-1">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-rose-500/40 via-amber-500/30 to-transparent"></div>
               <div>
                 <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
@@ -444,7 +444,7 @@ export default function App() {
 
           {/* BEGIN: SystemConfigCard */}
           <ErrorBoundary label="System Config">
-            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex flex-col flex-1">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col flex-1">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-cyan-500/40 via-blue-500/20 to-transparent"></div>
               <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
                 <div className="flex items-center gap-2">
@@ -521,10 +521,10 @@ export default function App() {
         {/* ========================================================================= */}
         {/* COLUMN 2: PRIMARY COMMAND & SIMULATOR CONSOLE (Center Column - 5 cols) */}
         {/* ========================================================================= */}
-        <div className="lg:col-span-5 xl:col-span-5 flex flex-col gap-5">
+        <div className="lg:col-span-5 xl:col-span-5 flex flex-col gap-3 sm:gap-4 md:gap-5">
           {/* BEGIN: LiveRiskMonitorCard */}
           <ErrorBoundary label="Live Risk Monitor">
-            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex flex-col overflow-hidden">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col overflow-hidden">
               <div className="absolute -top-16 left-1/2 -translate-x-1/2 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
 
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-2 border-b border-cyber-border/60 relative z-10">
@@ -878,7 +878,7 @@ export default function App() {
         {/* ========================================================================= */}
         <div className="lg:col-span-4 xl:col-span-4 flex flex-col">
           <ErrorBoundary label="Audit Timeline">
-            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-5 relative shadow-tactical flex-1 flex flex-col min-h-[580px]">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex-1 flex flex-col min-h-[400px] sm:min-h-[500px] md:min-h-[580px]">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-500/30 to-rose-500/30"></div>
 
               <div className="flex items-center justify-between mb-4 pb-2 border-b border-cyber-border/60">
@@ -941,7 +941,7 @@ export default function App() {
               )}
 
               {events.length === 0 ? (
-                <div className="flex-1 rounded-xl border border-dashed border-cyber-border bg-[#06080e]/80 relative flex flex-col items-center justify-center p-8 overflow-hidden">
+                <div className="flex-1 rounded-xl border border-dashed border-cyber-border bg-[#06080e]/80 relative flex flex-col items-center justify-center p-4 sm:p-6 md:p-8 overflow-hidden">
                   <div className="relative w-40 h-40 mb-5 flex items-center justify-center">
                     <div className="absolute inset-0 rounded-full border border-cyber-border/70"></div>
                     <div className="absolute inset-4 rounded-full border border-cyber-border/50"></div>
