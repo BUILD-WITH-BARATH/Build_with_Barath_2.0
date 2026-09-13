@@ -911,7 +911,7 @@ class BehavioralRiskEngine:
         return {r["record_id"]: r["n"] for r in rows}
 
     def evaluate(self, tenant_id: str, subject: str, record_id: int | str, allowed: bool,
-                 endpoint: str = "records", http_verb: str = "GET") -> tuple[str, list[str], bool, int, str]:
+                 endpoint: str = "records", http_verb: str = "GET", register_strike: bool = True) -> tuple[str, list[str], bool, int, str]:
         now = time.time()
 
         if self.blocked_until(tenant_id, subject) > now:
@@ -936,9 +936,10 @@ class BehavioralRiskEngine:
         decision = "allow" if allowed else "deny"
         if score >= 90:
             decision = "block"
-            lockout, strike_sig, count = self.register_strike_and_block(tenant_id, subject, now)
-            signals.append("blocked_due_to_high_risk")
-            signals.append(strike_sig)
+            if register_strike:
+                lockout, strike_sig, count = self.register_strike_and_block(tenant_id, subject, now)
+                signals.append("blocked_due_to_high_risk")
+                signals.append(strike_sig)
 
         return decision, signals, unseen, score, category
 
