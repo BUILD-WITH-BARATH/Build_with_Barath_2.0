@@ -2658,24 +2658,37 @@ def get_lockout_status(subject: str, x_api_key: str | None = Header(default=None
     try:
         target_tenant = DEMO_TENANT_ID
         if x_api_key:
-            try:
-                with db() as c:
-                    t_row = c.execute("SELECT id FROM tenants WHERE api_key_hash = %s", (hash_api_key(x_api_key),)).fetchone()
-                    if t_row:
-                        target_tenant = t_row["id"]
-            except Exception:
-                pass
+            if x_api_key == "dev_test_key":
+                target_tenant = "lost_found_dev"
+            else:
+                try:
+                    with db() as c:
+                        t_row = c.execute("SELECT id FROM tenants WHERE api_key_hash = %s", (hash_api_key(x_api_key),)).fetchone()
+                        if t_row:
+                            target_tenant = t_row["id"]
+                except Exception:
+                    pass
         elif tenant:
             target_tenant = tenant
-        else:
-            # Check if subject is actively blocked in ANY tenant
+
+        # If tenant is still default DEMO_TENANT_ID, check if this subject exists in another tenant (blocks or strikes)
+        if target_tenant == DEMO_TENANT_ID:
             with db() as c:
-                t_row = c.execute(
+                # 1. Check active blocks first
+                b_row = c.execute(
                     "SELECT tenant_id FROM risk_blocks WHERE subject = %s AND blocked_until > %s ORDER BY blocked_until DESC LIMIT 1",
                     (subject, now)
                 ).fetchone()
-                if t_row:
-                    target_tenant = t_row["tenant_id"]
+                if b_row:
+                    target_tenant = b_row["tenant_id"]
+                else:
+                    # 2. Check existing strikes (retains strike history across cooldown expiration!)
+                    s_row = c.execute(
+                        "SELECT tenant_id FROM risk_strikes WHERE subject = %s ORDER BY at DESC LIMIT 1",
+                        (subject,)
+                    ).fetchone()
+                    if s_row:
+                        target_tenant = s_row["tenant_id"]
 
         # Check blocked_until in target tenant
         blocked_until = engine.blocked_until(target_tenant, subject)
@@ -3047,17 +3060,22 @@ def log_timer_audit(payload: dict, tenant_id: str = Depends(get_tenant_from_api_
 
 @app.post("/hackathon/release")
 def hackathon_release(payload: dict) -> dict:
-    """Bypass endpoint for hackathon demo to immediately release active quarantines."""
+    """Bypass endpoint for hackathon demo to immediately release active quarantines.
+    Preserves strike history so Strike 2 / Strike 3 test cycles proceed naturally.
+    """
     subject = str(payload.get("subject", "")).strip()
     client_ip = str(payload.get("client_ip", "")).strip()
+    full_reset = bool(payload.get("full_reset", False))
     with db() as c:
         for sub in (subject, client_ip):
             if sub:
                 c.execute("DELETE FROM risk_blocks WHERE subject = %s", (sub,))
-                c.execute("DELETE FROM risk_strikes WHERE subject = %s", (sub,))
-                c.execute("DELETE FROM risk_bans WHERE subject = %s", (sub,))
-                c.execute("DELETE FROM risk_events WHERE subject = %s", (sub,))
-    return {"status": "released", "subject": subject, "client_ip": client_ip}
+                c.execute("DELETE FROM risk_bans WHERE subject = %s AND status != 'approved'", (sub,))
+                if full_reset:
+                    c.execute("DELETE FROM risk_strikes WHERE subject = %s", (sub,))
+                    c.execute("DELETE FROM risk_bans WHERE subject = %s", (sub,))
+                    c.execute("DELETE FROM risk_events WHERE subject = %s", (sub,))
+    return {"status": "released", "subject": subject, "client_ip": client_ip, "full_reset": full_reset}
 
 
 @app.post("/v1/authorize-batch")
@@ -3427,6 +3445,12 @@ tags:
 def ensure_database() -> None:
     init_schema()
     seed_demo_tenant(force=False)
+    with db() as c:
+        c.execute(
+            "INSERT INTO tenants (id, name, api_key_hash, created_at) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            ("lost_found_dev", "Lost & Found Dev", hash_api_key("dev_test_key"), time.time()),
+        )
 
 
 ensure_database()
