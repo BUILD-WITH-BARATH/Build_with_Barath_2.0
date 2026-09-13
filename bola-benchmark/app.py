@@ -1329,8 +1329,18 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
         tenant_ids = c.execute(
             "SELECT DISTINCT tenant_id, COUNT(*) as n FROM audit_events GROUP BY tenant_id ORDER BY n DESC"
         ).fetchall()
+        # Also check filtered events (what /audit-timeline shows)
+        filtered_tenant_ids = c.execute(
+            """SELECT DISTINCT tenant_id, COUNT(*) as n FROM audit_events
+               WHERE (detector_decision IN ('block', 'alert') OR
+                      outcome IN ('blocked', 'denied') OR
+                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
+                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')
+               GROUP BY tenant_id ORDER BY n DESC"""
+        ).fetchall()
 
-    print(f"RESET: tenant_ids in audit_events: {tenant_ids}")
+    print(f"RESET: ALL tenant_ids: {tenant_ids}")
+    print(f"RESET: FILTERED tenant_ids: {filtered_tenant_ids}")
 
     # Count audit events BEFORE reset (all of them)
     with db() as c:
@@ -1341,8 +1351,15 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
             "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
             (DEMO_TENANT_ID,)
         ).fetchone()["n"]
+        before_count_filtered = c.execute(
+            """SELECT COUNT(*) as n FROM audit_events
+               WHERE (detector_decision IN ('block', 'alert') OR
+                      outcome IN ('blocked', 'denied') OR
+                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
+                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')"""
+        ).fetchone()["n"]
 
-    print(f"RESET BEFORE: all={before_count_all}, demo={before_count_demo}")
+    print(f"RESET BEFORE: all={before_count_all}, demo={before_count_demo}, filtered={before_count_filtered}")
 
     # Reset FastAPI state - this DELETES audit_events from database
     seed_demo_tenant(force=True)
@@ -1357,18 +1374,35 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
             "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
             (DEMO_TENANT_ID,)
         ).fetchone()["n"]
+        after_count_filtered = c.execute(
+            """SELECT COUNT(*) as n FROM audit_events
+               WHERE (detector_decision IN ('block', 'alert') OR
+                      outcome IN ('blocked', 'denied') OR
+                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
+                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')"""
+        ).fetchone()["n"]
 
-    print(f"RESET AFTER: all={after_count_all}, demo={after_count_demo}")
+    print(f"RESET AFTER: all={after_count_all}, demo={after_count_demo}, filtered={after_count_filtered}")
 
     return {
         "status": "reset",
-        "audit_events_before_all": before_count_all,
-        "audit_events_before_demo": before_count_demo,
-        "audit_events_after_all": after_count_all,
-        "audit_events_after_demo": after_count_demo,
-        "deleted_all": before_count_all - after_count_all,
-        "deleted_demo": before_count_demo - after_count_demo,
-        "tenant_ids": [dict(t) for t in tenant_ids]
+        "audit_events_before": {
+            "all": before_count_all,
+            "demo": before_count_demo,
+            "filtered": before_count_filtered
+        },
+        "audit_events_after": {
+            "all": after_count_all,
+            "demo": after_count_demo,
+            "filtered": after_count_filtered
+        },
+        "deleted": {
+            "all": before_count_all - after_count_all,
+            "demo": before_count_demo - after_count_demo,
+            "filtered": before_count_filtered - after_count_filtered
+        },
+        "tenant_ids_all": [dict(t) for t in tenant_ids],
+        "tenant_ids_filtered": [dict(t) for t in filtered_tenant_ids]
     }
 
 
