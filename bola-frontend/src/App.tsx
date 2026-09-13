@@ -957,15 +957,10 @@ export default function App() {
                       No events recorded.
                     </span>
                     <p className="font-mono text-[11px] text-cyber-textMuted leading-relaxed">
-                      Monitoring telemetry stream for authorization attempts, velocity spikes, and defense events.
+                      Waiting for activity. Run a test above to see events appear here.
                     </p>
                   </div>
 
-                  <div className="absolute bottom-3 text-center">
-                    <span className="font-mono text-[9px] text-slate-500 uppercase tracking-widest">
-                      AWAITING STREAM INGESTION • LISTENING ON PORT 443
-                    </span>
-                  </div>
                 </div>
               ) : (
                 <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[640px] pr-1">

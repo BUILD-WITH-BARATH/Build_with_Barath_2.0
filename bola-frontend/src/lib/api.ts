@@ -131,7 +131,7 @@ const SCENARIOS: Record<string, { scenario_name?: string; attacker_subject?: str
   NORMAL: { attacker_subject: 'bob', target_records: ['51', '52', '53'] },
   'RAPID BOLA': { scenario_name: 'horizontal_privilege' },
   'LOW & SLOW': { scenario_name: 'stealth_creep' },
-  COORDINATED: { scenario_name: 'idor_sweep' },
+  'COORDINATED': { scenario_name: 'idor_sweep' },
 };
 
 export async function runSimulation(kind: keyof typeof SCENARIOS): Promise<SimResult> {
