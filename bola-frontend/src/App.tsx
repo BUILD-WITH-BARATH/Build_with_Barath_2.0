@@ -964,15 +964,22 @@ export default function App() {
                                `Normal access`}
                             </span>
                           </div>
-                          <div className="text-[8px] text-cyber-textMuted pl-3.5">
-                            Triggered: {
-                              is404 ? 'enum' :
-                              isCanary ? 'honeypot' :
-                              isAdmin ? 'admin' :
-                              isDenied ? 'no auth' :
-                              isBlocked ? 'high risk' :
-                              'normal'
-                            }
+                          <div className="text-[8px] text-cyber-textMuted pl-3.5 flex items-center gap-2">
+                            <span>
+                              Triggered: {
+                                is404 ? 'enum' :
+                                isCanary ? 'honeypot' :
+                                isAdmin ? 'admin' :
+                                isDenied ? 'no auth' :
+                                isBlocked ? 'high risk' :
+                                'normal'
+                              }
+                            </span>
+                            {isTimer && ev.explanation?.includes('remaining') && (
+                              <span className="text-rose-400 font-bold">
+                                {ev.explanation?.match(/\d+s remaining/)?.[0] || '—'}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
