@@ -935,32 +935,45 @@ export default function App() {
                           </div>
                           <span className="text-cyber-textMuted text-[9px] whitespace-nowrap ml-2">{timeAgo(ev.occurred_at)}</span>
                         </div>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider flex-shrink-0 ${
-                            isTimer
-                              ? 'bg-cyan-500/20 text-cyan-300'
-                              : isAdmin
-                              ? 'bg-red-500/30 text-red-200'
-                              : isBlocked
-                              ? 'bg-rose-500/20 text-rose-300'
-                              : isCanary
-                              ? 'bg-pink-500/20 text-pink-300'
-                              : is404
-                              ? 'bg-violet-500/20 text-violet-300'
-                              : isDenied
-                              ? 'bg-amber-500/20 text-amber-300'
-                              : 'bg-emerald-500/10 text-emerald-400'
-                          }`}>
-                            {isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
-                          </span>
-                          <span className="text-[9px] text-cyber-textMuted truncate flex-1">
-                            {isBlocked && ev.record_id?.includes('timer') ? `Strike ${ev.record_id?.match(/\d+/)?.[0] || '?'}` :
-                             is404 ? 'enum' :
-                             isCanary ? 'trap' :
-                             isAdmin ? 'portal' :
-                             isDenied ? 'denied' :
-                             'allowed'}
-                          </span>
+                        <div className="mt-1.5 space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider flex-shrink-0 ${
+                              isTimer
+                                ? 'bg-cyan-500/20 text-cyan-300'
+                                : isAdmin
+                                ? 'bg-red-500/30 text-red-200'
+                                : isBlocked
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : isCanary
+                                ? 'bg-pink-500/20 text-pink-300'
+                                : is404
+                                ? 'bg-violet-500/20 text-violet-300'
+                                : isDenied
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : 'bg-emerald-500/10 text-emerald-400'
+                            }`}>
+                              {isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
+                            </span>
+                            <span className="text-[9px] text-cyber-textMuted flex-1">
+                              {isTimer ? `${ev.record_id?.includes('1/3') ? 'Strike 1/3' : ev.record_id?.includes('2/3') ? 'Strike 2/3' : 'Strike 3/3'} remaining` :
+                               isBlocked ? `Rapid access detected` :
+                               is404 ? `Object enumeration` :
+                               isCanary ? `Trap triggered` :
+                               isAdmin ? `Admin portal probe` :
+                               isDenied ? `Unauthorized access` :
+                               `Normal access`}
+                            </span>
+                          </div>
+                          <div className="text-[8px] text-cyber-textMuted pl-3.5">
+                            Triggered: {
+                              is404 ? 'enum' :
+                              isCanary ? 'honeypot' :
+                              isAdmin ? 'admin' :
+                              isDenied ? 'no auth' :
+                              isBlocked ? 'high risk' :
+                              'normal'
+                            }
+                          </div>
                         </div>
                       </div>
                     );
