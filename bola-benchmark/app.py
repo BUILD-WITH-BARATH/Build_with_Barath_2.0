@@ -964,19 +964,22 @@ class BehavioralRiskEngine:
         denied_short = [e for e in denied_all if now - e.at <= self.short_window]
 
         def _is_tracked_resource(ep: str) -> bool:
-            # "v1_batch" was missing here - denied requests through /v1/authorize-batch
-            # never counted toward unauthorized_unique_object_pressure or
-            # low_and_slow_reconnaissance (the two heaviest-weighted signals),
-            # so an attacker could evade both simply by batching instead of
-            # calling /v1/authorize one at a time.
-            return ep in ("records", "v1", "v1_batch", "records_batch", "records_mutation", "records_abac",
-                          "graphql", "hierarchy", "exports", "stored_ref", "async_jobs", "admin_login_probe", "admin_portal") or ep.startswith("body_ref:") or ep.startswith("admin_")
+            return (
+                ep in ("records", "v1", "v1_batch", "records_batch", "records_mutation", "records_abac",
+                       "graphql", "hierarchy", "exports", "stored_ref", "async_jobs", "admin_login_probe", "admin_portal")
+                or ep.startswith("body_ref:")
+                or ep.startswith("admin_")
+                or ep.startswith("item")
+                or ep.startswith("claim")
+                or ep.startswith("django")
+            )
 
         unique_denied_short = len({e.record_id for e in denied_short if _is_tracked_resource(e.endpoint)})
         unique_denied_long = len({e.record_id for e in denied_all if _is_tracked_resource(e.endpoint)})
 
         total_long = len(q)
         failed_long = len(denied_all)
+        failed_short = len(denied_short)
 
         signals = []
         contributions = {}
@@ -1267,7 +1270,9 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "relational_chain_mismatch": "Warning: Hierarchical parent-child relationship check failed (BOLA path traversal).",
         "second_order_bola_violation": "Warning: Second-order stored reference pointed to an unauthorized or foreign resource.",
         "canary_honeypot_triggered": "CRITICAL: Honeypot canary trap triggered. Instant permanent ban enforced.",
-        "unauthorized_admin_access_attempt": "Unauthorized attempt to access privileged administrative portal or authenticate with invalid credentials."
+        "unauthorized_admin_access_attempt": "Unauthorized attempt to access privileged administrative portal or authenticate with invalid credentials.",
+        "repeated_unauthorized_trial": "Warning: Repeated unauthorized object access detected within active session.",
+        "unauthorized_trial_threshold_exceeded": "Exhausted 3 unauthorized object access trials within active session. Workstation quarantined."
     }
     return [messages[s] for s in signals if s in messages]
 
@@ -2908,6 +2913,50 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     decision, signals, _unseen, score, category = engine.evaluate(
         tenant_id, subject, resource_id, authorized, endpoint=endpoint, http_verb=http_verb
     )
+    now_ts = time.time()
+    events = engine._events(tenant_id, subject, now_ts)
+    denied_short = [e for e in events if not e.allowed and (now_ts - e.at) <= engine.short_window]
+    trial_count = len(denied_short)
+
+    is_canary = str(resource_id).strip() in ("0", "999999", "canary_admin_vault") or endpoint == "canary_trap"
+    is_admin = endpoint.startswith("admin_") or str(resource_id).startswith("privileged_admin") or endpoint in ("admin_login_probe", "admin_portal")
+    is_zero_tolerance = bool(is_canary or is_admin)
+
+    if not authorized:
+        if is_zero_tolerance:
+            decision = "block"
+            score = 100.0
+            category = "Attack"
+            sig = "canary_honeypot_triggered" if is_canary else "unauthorized_admin_access_attempt"
+            if sig not in signals:
+                signals.append(sig)
+            if engine.blocked_until(tenant_id, subject) <= now_ts:
+                lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, now_ts)
+                if strike_sig not in signals:
+                    signals.append(strike_sig)
+        elif trial_count >= 3:
+            # 3rd unauthorized attempt in active window -> enforce Strike 1 lockout!
+            decision = "block"
+            score = max(score, 95.0)
+            category = "Attack"
+            if "unauthorized_trial_threshold_exceeded" not in signals:
+                signals.append("unauthorized_trial_threshold_exceeded")
+            if engine.blocked_until(tenant_id, subject) <= now_ts:
+                lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, now_ts)
+                if strike_sig not in signals:
+                    signals.append(strike_sig)
+        else:
+            # Trials 1 & 2: Warning window, do NOT block
+            decision = "deny"
+            if trial_count == 1:
+                score = min(40.0, max(25.0, score))
+                category = "Normal"
+            elif trial_count == 2:
+                score = min(70.0, max(50.0, score))
+                category = "High Risk"
+                if "repeated_unauthorized_trial" not in signals:
+                    signals.append("repeated_unauthorized_trial")
+
     detector_explanations = explain_detector_signals(signals)
 
     outcome = "blocked" if decision == "block" else ("allowed" if authorized else "denied")
@@ -2916,7 +2965,6 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         dispatch_soc_alert(tenant_id, subject, resource_id, score, category, signals)
 
     final_decision = "block" if decision == "block" else ("allow" if authorized else "deny")
-    now_ts = time.time()
     blocked_until = engine.blocked_until(tenant_id, subject)
     remaining = int(blocked_until - now_ts) if blocked_until > now_ts else (120 if final_decision == "block" else 0)
     expires_at = int(blocked_until) if blocked_until > now_ts else (int(now_ts + remaining) if final_decision == "block" else None)
@@ -2943,6 +2991,8 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "lockout_remaining_s": remaining,
         "lockout_expires_at": expires_at,
         "strike_count": max(1, strike_count) if final_decision == "block" else strike_count,
+        "trial_count": min(3, max(1, trial_count)) if not authorized else 0,
+        "max_trials": 3,
     }
 
 
@@ -2978,6 +3028,7 @@ def hackathon_release(payload: dict) -> dict:
                 c.execute("DELETE FROM risk_blocks WHERE subject = %s", (sub,))
                 c.execute("DELETE FROM risk_strikes WHERE subject = %s", (sub,))
                 c.execute("DELETE FROM risk_bans WHERE subject = %s", (sub,))
+                c.execute("DELETE FROM risk_events WHERE subject = %s", (sub,))
     return {"status": "released", "subject": subject, "client_ip": client_ip}
 
 
