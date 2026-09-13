@@ -179,7 +179,7 @@ export default function App() {
     setTimeout(() => setActiveBtn(null), 300);
     setSimRunning('RESET');
     try {
-      // Call reset endpoint to clear backend database
+      // Call reset endpoint to clear backend database and cache
       const res = await fetch(`${API_BASE}/reset`, { method: 'POST' });
 
       if (!res.ok) {
@@ -187,20 +187,21 @@ export default function App() {
         return;
       }
 
-      // Clear frontend state completely
+      // Clear ALL frontend state completely - leave dashboard blank
       setRiskSubject('');
       setSubjectInput('');
       setSimVerdict(null);
-      setEvents([]);  // Clear audit timeline
+      setEvents([]);
       setConfig(null);
       setStats(null);
       setRisk(null);
-      setOnline(null);
+      setRiskLoading(false);
+      setOnline(true);
       setApiError(null);
+      setActiveBtn(null);
 
-      // Trigger immediate refresh to reload fresh data
-      await new Promise(r => setTimeout(r, 300));
-      await refreshPassive();
+      // Do NOT refresh - leave the dashboard completely empty
+      // The auto-refresh in the useEffect will pick it up in 3 seconds if user wants fresh data
     } catch (err) {
       setSimVerdict(`Reset error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
