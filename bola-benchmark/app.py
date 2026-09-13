@@ -442,6 +442,11 @@ def init_schema() -> None:
                 occurred_at DOUBLE PRECISION NOT NULL,
                 payload JSONB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DOUBLE PRECISION NOT NULL
+            );
             """
         )
     # Each defensive migration below gets its OWN connection/transaction, not a
@@ -480,6 +485,39 @@ def init_schema() -> None:
             # migration failure shows up instead of vanishing the way this
             # exact class of bug did before.
             print(f"[schema migration] skipped ({exc.__class__.__name__}): {migration_sql}")
+
+
+def get_system_config(key: str, default: str | None = None) -> str | None:
+    try:
+        with db() as c:
+            row = c.execute("SELECT value FROM system_config WHERE key = %s", (key,)).fetchone()
+            if row and "value" in row:
+                return str(row["value"])
+    except Exception as e:
+        print(f"[get_system_config] error: {e}")
+    return default
+
+
+def set_system_config(key: str, value: str) -> None:
+    now = time.time()
+    try:
+        with db() as c:
+            c.execute(
+                "INSERT INTO system_config (key, value, updated_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+                (key, str(value), now),
+            )
+    except Exception as e:
+        print(f"[set_system_config] error: {e}")
+
+
+def is_defense_enabled() -> bool:
+    val = get_system_config("defense_enabled", "true")
+    return str(val).lower() not in ("false", "0", "off", "disabled")
+
+
+def set_defense_enabled(enabled: bool) -> None:
+    set_system_config("defense_enabled", "true" if enabled else "false")
 
 
 def seed_demo_tenant(force: bool = False) -> None:
@@ -753,7 +791,7 @@ class BehavioralRiskEngine:
     tenant A's traffic can never affect tenant B's risk scores or blocks."""
 
     def __init__(self, short_window: float = 30.0, long_window: float = 3600.0, block_duration: float = 120.0,
-                 rapid_threshold: int = 4, slow_threshold: int = 15, strike_window: float = 86400.0):
+                 rapid_threshold: int = 4, slow_threshold: int = 15, strike_window: float = 3600.0):
         self.short_window = short_window
         self.long_window = long_window
         self.block_duration = block_duration
@@ -825,6 +863,20 @@ class BehavioralRiskEngine:
         return float(row["at"]) if row else 0.0
 
     def register_strike_and_block(self, tenant_id: str, subject: str, now: float) -> tuple[float, str, int]:
+        current_blocked_until = self.blocked_until(tenant_id, subject)
+        if current_blocked_until > now:
+            count = self.get_strike_count(tenant_id, subject, now)
+            rem = current_blocked_until - now
+            if self._ban_status(tenant_id, subject) == "approved":
+                signal = "strike_3_permanent_ban_approved"
+            elif count == 1:
+                signal = "strike_1_soft_lockout_2m"
+            elif count == 2:
+                signal = "strike_2_hard_lockout_30m"
+            else:
+                signal = "strike_3_pending_admin_approval"
+            return rem, signal, max(1, count)
+
         with db() as c:
             c.execute("INSERT INTO risk_strikes (tenant_id, subject, at) VALUES (%s, %s, %s)",
                       (tenant_id, subject, now))
@@ -1054,11 +1106,11 @@ class BehavioralRiskEngine:
                 contributions["ml_behavioral_anomaly"] = 15
                 signals.append("ml_behavioral_anomaly")
 
-        score = min(100, sum(contributions.values()))
+        score = max(0.0, min(100.0, float(sum(contributions.values()))))
 
         if self.blocked_until(tenant_id, subject) > now:
-            contributions["blocked_override"] = 100 - sum(contributions.values())
-            score = 100
+            contributions["blocked_override"] = 100.0 - sum(contributions.values())
+            score = 100.0
             if "temporarily_blocked" not in signals:
                 signals.append("temporarily_blocked")
             strike_count = self.get_strike_count(tenant_id, subject, now)
@@ -1083,7 +1135,7 @@ class BehavioralRiskEngine:
         else:
             category = "Attack"
 
-        return {"score": score, "signals": signals, "category": category, "contributions": contributions}
+        return {"score": max(0.0, min(100.0, float(score))), "signals": signals, "category": category, "contributions": contributions}
 
 
 engine = BehavioralRiskEngine()
@@ -1315,87 +1367,24 @@ def me(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
 
 
 @app.post("/reset")
+@app.post("/admin/reset")
 @limiter.limit("60/minute")
-def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
-    # Check what tenant_ids actually exist in audit_events
-    with db() as c:
-        tenant_ids = c.execute(
-            "SELECT DISTINCT tenant_id, COUNT(*) as n FROM audit_events GROUP BY tenant_id ORDER BY n DESC"
-        ).fetchall()
-        # Also check filtered events (what /audit-timeline shows)
-        filtered_tenant_ids = c.execute(
-            """SELECT DISTINCT tenant_id, COUNT(*) as n FROM audit_events
-               WHERE (detector_decision IN ('block', 'alert') OR
-                      outcome IN ('blocked', 'denied') OR
-                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
-                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')
-               GROUP BY tenant_id ORDER BY n DESC"""
-        ).fetchall()
-
-    print(f"RESET: ALL tenant_ids: {tenant_ids}")
-    print(f"RESET: FILTERED tenant_ids: {filtered_tenant_ids}")
-
-    # Count audit events BEFORE reset (all of them)
-    with db() as c:
-        before_count_all = c.execute(
-            "SELECT COUNT(*) as n FROM audit_events"
-        ).fetchone()["n"]
-        before_count_demo = c.execute(
-            "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
-            (DEMO_TENANT_ID,)
-        ).fetchone()["n"]
-        before_count_filtered = c.execute(
-            """SELECT COUNT(*) as n FROM audit_events
-               WHERE (detector_decision IN ('block', 'alert') OR
-                      outcome IN ('blocked', 'denied') OR
-                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
-                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')"""
-        ).fetchone()["n"]
-
-    print(f"RESET BEFORE: all={before_count_all}, demo={before_count_demo}, filtered={before_count_filtered}")
-
-    # Reset FastAPI state - this DELETES audit_events from database
+def reset_demo_database(request: Request = None, _guard: None = Depends(guard_demo_endpoint)) -> dict:
+    """Wipes all accumulated risk events, strikes, bans, audit ledgers, and resets the database to clean baseline."""
+    for t in (DEMO_TENANT_ID, "lost_found_dev"):
+        engine.reset(t)
+        with db() as c:
+            for table in ("risk_events", "risk_strikes", "risk_blocks", "risk_bans",
+                           "audit_events", "soc_alerts", "canary_triggers"):
+                try:
+                    c.execute(f"DELETE FROM {table} WHERE tenant_id = %s", (t,))
+                except Exception as exc:
+                    print(f"[reset] error deleting from {table} for {t}: {exc}")
     seed_demo_tenant(force=True)
-    engine.reset(DEMO_TENANT_ID)
-
-    # Verify deletion
-    with db() as c:
-        after_count_all = c.execute(
-            "SELECT COUNT(*) as n FROM audit_events"
-        ).fetchone()["n"]
-        after_count_demo = c.execute(
-            "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
-            (DEMO_TENANT_ID,)
-        ).fetchone()["n"]
-        after_count_filtered = c.execute(
-            """SELECT COUNT(*) as n FROM audit_events
-               WHERE (detector_decision IN ('block', 'alert') OR
-                      outcome IN ('blocked', 'denied') OR
-                      record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR
-                      record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%')"""
-        ).fetchone()["n"]
-
-    print(f"RESET AFTER: all={after_count_all}, demo={after_count_demo}, filtered={after_count_filtered}")
-
     return {
-        "status": "reset",
-        "audit_events_before": {
-            "all": before_count_all,
-            "demo": before_count_demo,
-            "filtered": before_count_filtered
-        },
-        "audit_events_after": {
-            "all": after_count_all,
-            "demo": after_count_demo,
-            "filtered": after_count_filtered
-        },
-        "deleted": {
-            "all": before_count_all - after_count_all,
-            "demo": before_count_demo - after_count_demo,
-            "filtered": before_count_filtered - after_count_filtered
-        },
-        "tenant_ids_all": [dict(t) for t in tenant_ids],
-        "tenant_ids_filtered": [dict(t) for t in filtered_tenant_ids]
+        "status": "database_reset_successful",
+        "tenant_id": DEMO_TENANT_ID,
+        "message": "All database tables, audit events, risk strikes, and behavioral states have been cleared."
     }
 
 
@@ -2615,13 +2604,17 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
     clamped_limit = max(1, min(limit, 200))
     with db() as c:
         rows = c.execute(
-            'SELECT id, occurred_at, subject_id, record_id, detector_decision, outcome, explanation '
-            "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') AND ("
-            "  detector_decision IN ('block', 'alert') OR "
-            "  outcome IN ('blocked', 'denied') OR "
-            "  record_id LIKE '%404%' OR record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR "
-            "  record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR record_id LIKE '%admin%'"
-            ") ORDER BY occurred_at DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo' OR tenant_id = 'lost_found_dev') AND ("
+            "  detector_decision != 'allow' OR "
+            "  outcome != 'allowed' OR "
+            "  \"authorization\" != 'authorized' OR "
+            "  record_id LIKE '%404%' OR record_id LIKE '%canary%' OR record_id LIKE '%trap%' OR "
+            "  record_id LIKE '%probe%' OR record_id LIKE '%fuzz%' OR record_id LIKE '%admin%' OR "
+            "  record_id LIKE '%timer%' OR record_id LIKE '%quarantine%' OR "
+            "  record_id LIKE 'item_%' OR record_id LIKE 'claim_%' OR record_id LIKE 'record_%' OR "
+            "  explanation LIKE '%strike%' OR explanation LIKE '%attack%' OR explanation LIKE '%violation%'"
+            ") ORDER BY occurred_at DESC, id DESC LIMIT %s", (tenant_id, tenant_id, clamped_limit)).fetchall()
     timeline = []
     for row in rows:
         timeline.append({
@@ -2643,10 +2636,10 @@ def _classify_event(record_id: str, decision: str) -> str:
         return "quarantine_timer"
     if "admin" in rec:
         return "admin_probe"
+    if "canary" in rec or "trap" in rec or rec in ("0", "999999"):
+        return "canary_trap"
     if decision == "block":
         return "blocked_access"
-    if "canary" in rec:
-        return "canary_trap"
     if "404" in rec or "fuzz" in rec or "probe" in rec or rec.startswith("record_") or rec.startswith("item_") or rec.startswith("claim_"):
         return "404_probe"
     return "denied_access"
@@ -2808,17 +2801,6 @@ def get_pending_bans(identity: tuple[str, str, str] = Depends(get_current_identi
     return {"pending_bans": engine.pending_bans(tenant_id), "approved_bans": engine.approved_bans(tenant_id)}
 
 
-@app.post("/reset")
-@app.post("/admin/reset")
-def reset_demo_database() -> dict:
-    """Wipes all accumulated risk events, strikes, bans, audit ledgers, and resets the database to clean baseline."""
-    seed_demo_tenant(force=True)
-    return {
-        "status": "database_reset_successful",
-        "tenant_id": DEMO_TENANT_ID,
-        "message": "All database tables, audit events, risk strikes, and behavioral states have been cleared."
-    }
-
 
 @app.get("/soc/alerts")
 def get_soc_alerts(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
@@ -2900,9 +2882,61 @@ def create_tenant(request: Request, payload: dict, x_signup_key: str | None = He
     }
 
 
+@app.get("/toggle-defense-status")
+@app.get("/v1/defense/status")
+@app.get("/defense-status")
+def get_defense_status_api() -> dict:
+    enabled = is_defense_enabled()
+    return {
+        "success": True,
+        "defense_enabled": enabled,
+        "status": "PROTECTED" if enabled else "VULNERABLE",
+    }
+
+
+@app.post("/toggle-defense")
+@app.post("/v1/defense/toggle")
+@app.post("/defense/toggle")
+async def toggle_defense_api(request: Request) -> dict:
+    target_state = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and "enabled" in body:
+            target_state = bool(body["enabled"])
+    except Exception:
+        pass
+
+    if target_state is None:
+        new_state = not is_defense_enabled()
+    else:
+        new_state = target_state
+
+    set_defense_enabled(new_state)
+    return {
+        "success": True,
+        "defense_enabled": new_state,
+        "status": "PROTECTED" if new_state else "VULNERABLE",
+        "message": f"BOLA Defense System is now {'ON (PROTECTED)' if new_state else 'OFF (VULNERABLE)'}",
+    }
+
+
 @app.post("/v1/authorize")
 @limiter.limit("1000/minute")
 def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_tenant_from_api_key)) -> dict:
+    if not is_defense_enabled():
+        return {
+            "decision": "allow",
+            "score": 0.0,
+            "category": "VULNERABLE_MODE_ACTIVE",
+            "signals": ["defense_system_disabled", "system_unprotected"],
+            "explanations": ["🚨 CRITICAL: BOLA DEFENSE SYSTEM IS DISABLED - SYSTEM IS COMPLETELY VULNERABLE 🚨"],
+            "lockout_remaining_s": 0,
+            "lockout_expires_at": None,
+            "strike_count": 0,
+            "trial_count": 0,
+            "max_trials": 3,
+        }
+
     subject = payload.get("subject")
     resource_id = payload.get("resource_id")
     authorized = bool(payload.get("authorized", False))
@@ -2998,6 +3032,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
                 if "repeated_unauthorized_trial" not in signals:
                     signals.append("repeated_unauthorized_trial")
 
+    score = max(0.0, min(100.0, float(score)))
     detector_explanations = explain_detector_signals(signals)
 
     outcome = "blocked" if decision == "block" else ("allowed" if authorized else "denied")
@@ -3025,7 +3060,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
 
     return {
         "decision": final_decision,
-        "score": score,
+        "score": max(0.0, min(100.0, float(score))),
         "category": category,
         "signals": signals,
         "explanations": detector_explanations,
@@ -3087,6 +3122,13 @@ def v1_authorize_batch(request: Request, payload: dict, tenant_id: str = Depends
         raise HTTPException(400, "subject and items array are required")
     if len(items) > BOLA_MAX_BATCH_SIZE:
         raise HTTPException(400, f"Batch size cannot exceed {BOLA_MAX_BATCH_SIZE} items")
+
+    if not is_defense_enabled():
+        return {
+            "total": len(items),
+            "blocked_mid_batch": False,
+            "results": [{"resource_id": str(it.get("resource_id", "")), "decision": "allow", "score": 0.0, "signals": ["defense_system_disabled"]} for it in items]
+        }
 
     results = []
     blocked_mid_batch = False
