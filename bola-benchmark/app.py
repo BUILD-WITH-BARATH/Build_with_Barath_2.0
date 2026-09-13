@@ -1324,12 +1324,25 @@ def me(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
 @app.post("/reset")
 @limiter.limit("60/minute")
 def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
-    # Count audit events BEFORE reset
+    # Check what tenant_ids actually exist in audit_events
     with db() as c:
-        before_count = c.execute(
+        tenant_ids = c.execute(
+            "SELECT DISTINCT tenant_id, COUNT(*) as n FROM audit_events GROUP BY tenant_id ORDER BY n DESC"
+        ).fetchall()
+
+    print(f"RESET: tenant_ids in audit_events: {tenant_ids}")
+
+    # Count audit events BEFORE reset (all of them)
+    with db() as c:
+        before_count_all = c.execute(
+            "SELECT COUNT(*) as n FROM audit_events"
+        ).fetchone()["n"]
+        before_count_demo = c.execute(
             "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
             (DEMO_TENANT_ID,)
         ).fetchone()["n"]
+
+    print(f"RESET BEFORE: all={before_count_all}, demo={before_count_demo}")
 
     # Reset FastAPI state - this DELETES audit_events from database
     seed_demo_tenant(force=True)
@@ -1337,18 +1350,25 @@ def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict
 
     # Verify deletion
     with db() as c:
-        after_count = c.execute(
+        after_count_all = c.execute(
+            "SELECT COUNT(*) as n FROM audit_events"
+        ).fetchone()["n"]
+        after_count_demo = c.execute(
             "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
             (DEMO_TENANT_ID,)
         ).fetchone()["n"]
 
-    print(f"RESET: audit_events {before_count} -> {after_count}")
+    print(f"RESET AFTER: all={after_count_all}, demo={after_count_demo}")
 
     return {
         "status": "reset",
-        "audit_events_before": before_count,
-        "audit_events_after": after_count,
-        "deleted": before_count - after_count
+        "audit_events_before_all": before_count_all,
+        "audit_events_before_demo": before_count_demo,
+        "audit_events_after_all": after_count_all,
+        "audit_events_after_demo": after_count_demo,
+        "deleted_all": before_count_all - after_count_all,
+        "deleted_demo": before_count_demo - after_count_demo,
+        "tenant_ids": [dict(t) for t in tenant_ids]
     }
 
 
