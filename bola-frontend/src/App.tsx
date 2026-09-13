@@ -955,7 +955,11 @@ export default function App() {
                               {isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
                             </span>
                             <span className="text-[9px] text-cyber-textMuted flex-1">
-                              {isTimer ? `${ev.record_id?.includes('1/3') ? 'Strike 1/3' : ev.record_id?.includes('2/3') ? 'Strike 2/3' : 'Strike 3/3'} remaining` :
+                              {isTimer ? (() => {
+                                const strikeMatch = ev.explanation?.match(/Strike (\d+)\/3/);
+                                const strikeNum = strikeMatch ? strikeMatch[1] : '?';
+                                return `Strike ${strikeNum}/3 remaining`;
+                              })() :
                                isBlocked ? `Rapid access detected` :
                                is404 ? `Object enumeration` :
                                isCanary ? `Trap triggered` :
