@@ -366,9 +366,9 @@ export default function App() {
       {/* BEGIN: DashboardLayout (Functional Command Grid) */}
       <main className="flex-1 w-full p-3 sm:p-4 md:p-5 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 md:gap-5">
         {/* ========================================================================= */}
-        {/* COLUMN 1: POSTURE & ENGINE (Left Column - 3 cols) */}
+        {/* COLUMN 1: POSTURE & ENGINE (Left Column - 3 cols) - HIDDEN */}
         {/* ========================================================================= */}
-        <div className="lg:col-span-3 xl:col-span-3 flex flex-col gap-3 sm:gap-4 md:gap-5">
+        <div className="hidden lg:col-span-3 xl:col-span-3 flex flex-col gap-3 sm:gap-4 md:gap-5">
           {/* BEGIN: SecurityOverviewCard */}
           <ErrorBoundary label="Security Overview">
             <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative overflow-hidden shadow-tactical flex flex-col justify-between flex-1">
@@ -523,9 +523,9 @@ export default function App() {
         {/* END: Column 1 */}
 
         {/* ========================================================================= */}
-        {/* COLUMN 2: PRIMARY COMMAND & SIMULATOR CONSOLE (Center Column - 5 cols) */}
+        {/* COLUMN 2: PRIMARY COMMAND & SIMULATOR CONSOLE (Center Column - EXPANDED) */}
         {/* ========================================================================= */}
-        <div className="lg:col-span-5 xl:col-span-5 flex flex-col gap-3 sm:gap-4 md:gap-5">
+        <div className="lg:col-span-7 xl:col-span-6 flex flex-col gap-3 sm:gap-4 md:gap-5">
           {/* BEGIN: LiveRiskMonitorCard */}
           <ErrorBoundary label="Live Risk Monitor">
             <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col overflow-hidden">
@@ -609,7 +609,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mt-4 pt-3 border-t border-cyber-border/60">
+              <div className="hidden mt-4 pt-3 border-t border-cyber-border/60">
                 <div className="flex items-center justify-between mb-3">
                   <span className="font-mono text-[10px] uppercase font-bold tracking-widest text-cyber-textMuted">
                     SCORE BREAKDOWN
@@ -878,9 +878,9 @@ export default function App() {
         {/* END: Column 2 */}
 
         {/* ========================================================================= */}
-        {/* COLUMN 3: AUDIT LEDGER & STREAM (Right Column - 4 cols) */}
+        {/* COLUMN 3: AUDIT LEDGER & STREAM (Right Column - EXPANDED) */}
         {/* ========================================================================= */}
-        <div className="lg:col-span-4 xl:col-span-4 flex flex-col">
+        <div className="lg:col-span-5 xl:col-span-6 flex flex-col">
           <ErrorBoundary label="Audit Timeline">
             <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex-1 flex flex-col min-h-[400px] sm:min-h-[500px] md:min-h-[580px]">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-500/30 to-rose-500/30"></div>
