@@ -1037,7 +1037,12 @@ class BehavioralRiskEngine:
             try:
                 short_ids.append(int(rid))
             except (TypeError, ValueError):
-                pass
+                m_dig = re.search(r'\d+', str(rid))
+                if m_dig:
+                    try:
+                        short_ids.append(int(m_dig.group()))
+                    except (TypeError, ValueError):
+                        pass
         sequential_steps = sum(1 for a, b in zip(short_ids, short_ids[1:]) if abs(b - a) == 1)
         if sequential_steps >= 2:
             contributions["sequential_id_enumeration"] = 35
@@ -1049,9 +1054,9 @@ class BehavioralRiskEngine:
         elif unique_denied_long > 0:
             contributions["unique_denied_long"] = unique_denied_long * 2
 
-        if total_long > 0:
+        if total_long >= 5:
             ratio = failed_long / total_long
-            if ratio > 0.5 and failed_long > 5:
+            if ratio > 0.5:
                 contributions["high_failure_ratio"] = 20
                 signals.append("high_failure_ratio")
 
@@ -1312,7 +1317,8 @@ def explain_detector_signals(signals: list[str]) -> list[str]:
         "canary_honeypot_triggered": "CRITICAL: Honeypot canary trap triggered. Instant permanent ban enforced.",
         "unauthorized_admin_access_attempt": "Unauthorized attempt to access privileged administrative portal or authenticate with invalid credentials.",
         "repeated_unauthorized_trial": "Warning: Repeated unauthorized object access detected within active session.",
-        "unauthorized_trial_threshold_exceeded": "Exhausted 3 unauthorized object access trials within active session. Workstation quarantined."
+        "unauthorized_trial_threshold_exceeded": "Exhausted 3 unauthorized object access trials within active session. Workstation quarantined.",
+        "high_risk_reconnaissance": "High-risk anomalous access pattern detected (Score 70-89). Approaching lockout threshold."
     }
     return [messages[s] for s in signals if s in messages]
 
@@ -2974,66 +2980,54 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             "lockout_remaining_s": rem_sec,
             "lockout_expires_at": int(active_block),
             "strike_count": max(1, current_strikes),
-            "trial_count": 3,
-            "max_trials": 3,
+            "max_strikes": 3,
+            "risk_tier": "Attack (90-100)",
         }
 
-    # 2. Risk evaluation without auto-registering strikes (v1_authorize governs strike escalation)
+    # 2. Risk evaluation via BehavioralRiskEngine (Point-based scoring from architecture specification)
     decision, signals, _unseen, score, category = engine.evaluate(
         tenant_id, subject, resource_id, authorized, endpoint=endpoint, http_verb=http_verb, register_strike=False
     )
 
-    last_strike_ts = engine.get_last_strike_time(tenant_id, subject)
-    events = engine._events(tenant_id, subject, now_ts)
-    # Count denied events strictly SINCE the last strike in the active trial window
-    denied_events_since_strike = [
-        e for e in events
-        if not e.allowed and e.at > last_strike_ts and (now_ts - e.at) <= engine.long_window
-    ]
-    trial_count = len(denied_events_since_strike)
-
     is_canary = str(resource_id).strip() in ("0", "999999", "canary_admin_vault") or endpoint == "canary_trap"
     is_admin = endpoint.startswith("admin_") or str(resource_id).startswith("privileged_admin") or endpoint in ("admin_login_probe", "admin_portal")
-    is_zero_tolerance = bool(is_canary)
 
     if not authorized:
         strike_now = time.time()
-        if is_zero_tolerance:
+        # Point tiers from specification:
+        # • 0–39   -> totally fine, allowed / normal denial
+        # • 40–69  -> suspicious, just logged/flagged quietly
+        # • 70–89  -> high risk, logged more seriously
+        # • 90–100 -> treated as an active attack, triggers a strike
+        if score >= 90.0 or is_canary:
             decision = "block"
-            score = 100.0
             category = "Attack"
-            sig = "canary_honeypot_triggered"
-            if sig not in signals:
-                signals.append(sig)
-            lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
-            if strike_sig not in signals:
-                signals.append(strike_sig)
-            current_strikes = count
-            trial_count = 3
-        elif trial_count >= 3:
-            # 3rd unauthorized attempt in current cycle -> escalate to next strike tier!
-            decision = "block"
-            score = max(score, 95.0)
-            category = "Attack"
+            score = max(score, 100.0 if is_canary else 90.0)
+            if is_canary and "canary_honeypot_triggered" not in signals:
+                signals.append("canary_honeypot_triggered")
             if is_admin and "unauthorized_admin_access_attempt" not in signals:
                 signals.append("unauthorized_admin_access_attempt")
-            if "unauthorized_trial_threshold_exceeded" not in signals:
-                signals.append("unauthorized_trial_threshold_exceeded")
+            if "blocked_due_to_high_risk" not in signals:
+                signals.append("blocked_due_to_high_risk")
+
             lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
             if strike_sig not in signals:
                 signals.append(strike_sig)
             current_strikes = count
-        else:
-            # Trials 1 & 2: Warning & Alert window, STRICTLY DENIED (NEVER BLOCKED)
+        elif score >= 70.0:
+            # 70–89 -> high risk, logged more seriously
             decision = "deny"
-            if trial_count == 1:
-                score = 25.0
-                category = "Normal"
-            elif trial_count == 2:
-                score = 50.0
-                category = "High Risk"
-                if "repeated_unauthorized_trial" not in signals:
-                    signals.append("repeated_unauthorized_trial")
+            category = "High Risk"
+            if "high_risk_reconnaissance" not in signals:
+                signals.append("high_risk_reconnaissance")
+        elif score >= 40.0:
+            # 40–69 -> suspicious, just logged/flagged quietly
+            decision = "deny"
+            category = "Suspicious"
+        else:
+            # 0–39 -> totally fine, denied normally
+            decision = "deny"
+            category = "Normal"
 
     score = max(0.0, min(100.0, float(score)))
     detector_explanations = explain_detector_signals(signals)
@@ -3070,8 +3064,8 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "lockout_remaining_s": remaining,
         "lockout_expires_at": expires_at,
         "strike_count": max(1, strike_count) if final_decision == "block" else strike_count,
-        "trial_count": min(3, max(1, trial_count)) if not authorized else 0,
-        "max_trials": 3,
+        "max_strikes": 3,
+        "risk_tier": "Normal (0-39)" if score < 40 else ("Suspicious (40-69)" if score < 70 else ("High Risk (70-89)" if score < 90 else "Attack (90-100)")),
     }
 
 
