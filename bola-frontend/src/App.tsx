@@ -179,16 +179,14 @@ export default function App() {
     setTimeout(() => setActiveBtn(null), 300);
     setSimRunning('RESET');
     try {
-      // Call Django reset endpoint (port 8001) to clear audit database
-      const djangoReset = await fetch('http://127.0.0.1:8001/reset', { method: 'POST' });
-      console.log('Django reset response:', djangoReset.status, djangoReset.ok);
+      // Call FastAPI reset endpoint - it clears audit_events from database
+      const res = await fetch(`${API_BASE}/reset`, { method: 'POST' });
+      console.log('Reset response:', res.status, res.ok);
+      const data = await res.json();
+      console.log('Reset result:', data);
 
-      // Also call FastAPI reset endpoint (port 8000) to clear memory state
-      const fastApiReset = await fetch(`${API_BASE}/reset`, { method: 'POST' });
-      console.log('FastAPI reset response:', fastApiReset.status, fastApiReset.ok);
-
-      if (!djangoReset.ok || !fastApiReset.ok) {
-        setSimVerdict(`Reset failed: Django ${djangoReset.status}, FastAPI ${fastApiReset.status}`);
+      if (!res.ok) {
+        setSimVerdict(`Reset failed: ${res.status}`);
         return;
       }
 

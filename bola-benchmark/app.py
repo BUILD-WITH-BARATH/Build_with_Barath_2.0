@@ -1324,22 +1324,32 @@ def me(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
 @app.post("/reset")
 @limiter.limit("60/minute")
 def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
-    # Reset FastAPI state
+    # Count audit events BEFORE reset
+    with db() as c:
+        before_count = c.execute(
+            "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
+            (DEMO_TENANT_ID,)
+        ).fetchone()["n"]
+
+    # Reset FastAPI state - this DELETES audit_events from database
     seed_demo_tenant(force=True)
     engine.reset(DEMO_TENANT_ID)
 
-    # Also delete from Django's audit database
-    try:
-        import os
-        import django
-        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'lost_found_project.settings')
-        django.setup()
-        from audit.models import AuditLog
-        deleted_count, _ = AuditLog.objects.all().delete()
-    except Exception as e:
-        deleted_count = 0
+    # Verify deletion
+    with db() as c:
+        after_count = c.execute(
+            "SELECT COUNT(*) as n FROM audit_events WHERE tenant_id = %s",
+            (DEMO_TENANT_ID,)
+        ).fetchone()["n"]
 
-    return {"status": "reset", "audit_logs_deleted": deleted_count}
+    print(f"RESET: audit_events {before_count} -> {after_count}")
+
+    return {
+        "status": "reset",
+        "audit_events_before": before_count,
+        "audit_events_after": after_count,
+        "deleted": before_count - after_count
+    }
 
 
 _sse_subscribers: list[asyncio.Queue] = []
