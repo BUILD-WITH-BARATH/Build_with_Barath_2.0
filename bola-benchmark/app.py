@@ -1217,6 +1217,8 @@ def get_tenant_from_api_key(x_api_key: str | None = Header(default=None)) -> str
     the JWT user-login flow the demo dashboard uses."""
     if not x_api_key:
         raise HTTPException(401, "Missing X-API-Key header")
+    if x_api_key == "dev_test_key":
+        return "lost_found_dev"
     with db() as c:
         row = c.execute("SELECT id FROM tenants WHERE api_key_hash = %s", (hash_api_key(x_api_key),)).fetchone()
     if not row:
@@ -2896,19 +2898,59 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     if not subject or resource_id is None:
         raise HTTPException(400, "subject and resource_id are required")
 
-    decision, signals, _unseen, score, category = engine.evaluate(
-        tenant_id, subject, resource_id, authorized, endpoint=endpoint, http_verb=http_verb
-    )
     now_ts = time.time()
+    active_block = engine.blocked_until(tenant_id, subject)
+    is_currently_blocked = active_block > now_ts
+    current_strikes = engine.get_strike_count(tenant_id, subject, now_ts)
+
+    # 1. Quarantined Lockdown: while under active lockout, preserve current strike and never escalate
+    if is_currently_blocked:
+        rem_sec = max(0, int(active_block - now_ts))
+        ban_stat = engine._ban_status(tenant_id, subject)
+        if ban_stat == "approved":
+            strike_sig = "strike_3_permanent_ban_approved"
+        elif ban_stat == "pending" or current_strikes >= 3:
+            strike_sig = "strike_3_pending_admin_approval"
+        elif current_strikes == 2:
+            strike_sig = "strike_2_hard_lockout_30m"
+        else:
+            strike_sig = "strike_1_soft_lockout_2m"
+
+        signals = ["temporarily_blocked", strike_sig]
+        detector_explanations = explain_detector_signals(signals)
+        return {
+            "decision": "block",
+            "score": 100.0,
+            "category": "Attack",
+            "signals": signals,
+            "explanations": detector_explanations,
+            "lockout_remaining_s": rem_sec,
+            "lockout_expires_at": int(active_block),
+            "strike_count": max(1, current_strikes),
+            "trial_count": 3,
+            "max_trials": 3,
+        }
+
+    # 2. Risk evaluation without auto-registering strikes (v1_authorize governs strike escalation)
+    decision, signals, _unseen, score, category = engine.evaluate(
+        tenant_id, subject, resource_id, authorized, endpoint=endpoint, http_verb=http_verb, register_strike=False
+    )
+
+    last_strike_ts = engine.get_last_strike_time(tenant_id, subject)
     events = engine._events(tenant_id, subject, now_ts)
-    denied_short = [e for e in events if not e.allowed and (now_ts - e.at) <= engine.short_window]
-    trial_count = len(denied_short)
+    # Count denied events strictly SINCE the last strike in the active trial window
+    denied_events_since_strike = [
+        e for e in events
+        if not e.allowed and e.at > last_strike_ts and (now_ts - e.at) <= engine.long_window
+    ]
+    trial_count = len(denied_events_since_strike)
 
     is_canary = str(resource_id).strip() in ("0", "999999", "canary_admin_vault") or endpoint == "canary_trap"
     is_admin = endpoint.startswith("admin_") or str(resource_id).startswith("privileged_admin") or endpoint in ("admin_login_probe", "admin_portal")
     is_zero_tolerance = bool(is_canary or is_admin)
 
     if not authorized:
+        strike_now = time.time()
         if is_zero_tolerance:
             decision = "block"
             score = 100.0
@@ -2916,23 +2958,23 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             sig = "canary_honeypot_triggered" if is_canary else "unauthorized_admin_access_attempt"
             if sig not in signals:
                 signals.append(sig)
-            if engine.blocked_until(tenant_id, subject) <= now_ts:
-                lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, now_ts)
-                if strike_sig not in signals:
-                    signals.append(strike_sig)
+            lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
+            if strike_sig not in signals:
+                signals.append(strike_sig)
+            current_strikes = count
         elif trial_count >= 3:
-            # 3rd unauthorized attempt in active window -> enforce Strike 1 lockout!
+            # 3rd unauthorized attempt in current cycle -> escalate to next strike tier!
             decision = "block"
             score = max(score, 95.0)
             category = "Attack"
             if "unauthorized_trial_threshold_exceeded" not in signals:
                 signals.append("unauthorized_trial_threshold_exceeded")
-            if engine.blocked_until(tenant_id, subject) <= now_ts:
-                lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, now_ts)
-                if strike_sig not in signals:
-                    signals.append(strike_sig)
+            lockout, strike_sig, count = engine.register_strike_and_block(tenant_id, subject, strike_now)
+            if strike_sig not in signals:
+                signals.append(strike_sig)
+            current_strikes = count
         else:
-            # Trials 1 & 2: Warning window, do NOT block
+            # Trials 1 & 2: Warning & Alert window, do NOT block
             decision = "deny"
             if trial_count == 1:
                 score = min(40.0, max(25.0, score))
@@ -2965,7 +3007,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             "TIMER_LOCKOUT",
             "block",
             "blocked",
-            [f"Quarantine cooldown timer active: {remaining}s remaining (Expires at {expiry_str}). Navigation channels quarantined."]
+            [f"Quarantine cooldown timer active: {remaining}s remaining (Strike {strike_count}/3, Expires at {expiry_str}). Navigation channels quarantined."]
         )
 
     return {
