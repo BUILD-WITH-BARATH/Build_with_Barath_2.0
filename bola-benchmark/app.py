@@ -1324,9 +1324,22 @@ def me(identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
 @app.post("/reset")
 @limiter.limit("60/minute")
 def reset(request: Request, _guard: None = Depends(guard_demo_endpoint)) -> dict:
+    # Reset FastAPI state
     seed_demo_tenant(force=True)
     engine.reset(DEMO_TENANT_ID)
-    return {"status": "reset"}
+
+    # Also delete from Django's audit database
+    try:
+        import os
+        import django
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'lost_found_project.settings')
+        django.setup()
+        from audit.models import AuditLog
+        deleted_count, _ = AuditLog.objects.all().delete()
+    except Exception as e:
+        deleted_count = 0
+
+    return {"status": "reset", "audit_logs_deleted": deleted_count}
 
 
 _sse_subscribers: list[asyncio.Queue] = []
