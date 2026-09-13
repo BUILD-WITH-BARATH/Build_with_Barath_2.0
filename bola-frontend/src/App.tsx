@@ -181,12 +181,14 @@ export default function App() {
     try {
       // Call Django reset endpoint (port 8001) to clear audit database
       const djangoReset = await fetch('http://127.0.0.1:8001/reset', { method: 'POST' });
+      console.log('Django reset response:', djangoReset.status, djangoReset.ok);
 
       // Also call FastAPI reset endpoint (port 8000) to clear memory state
       const fastApiReset = await fetch(`${API_BASE}/reset`, { method: 'POST' });
+      console.log('FastAPI reset response:', fastApiReset.status, fastApiReset.ok);
 
-      if (!djangoReset.ok) {
-        setSimVerdict('Reset failed - database error');
+      if (!djangoReset.ok || !fastApiReset.ok) {
+        setSimVerdict(`Reset failed: Django ${djangoReset.status}, FastAPI ${fastApiReset.status}`);
         return;
       }
 
@@ -203,8 +205,8 @@ export default function App() {
       setApiError(null);
       setActiveBtn(null);
 
-      // Do NOT refresh - leave the dashboard completely empty
-      // The auto-refresh in the useEffect will pick it up in 3 seconds if user wants fresh data
+      // Wait before allowing refresh to ensure database is cleared
+      await new Promise(r => setTimeout(r, 500));
     } catch (err) {
       setSimVerdict(`Reset error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
