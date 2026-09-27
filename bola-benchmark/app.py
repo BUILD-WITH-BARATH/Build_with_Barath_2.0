@@ -55,6 +55,9 @@ from alerting import dispatch_alerts
 # Phase 4: advanced threat detection (IP reputation, geo-velocity, behavioral baselining, TLS fingerprint)
 import threat_detection
 
+# Phase 6: third-party SIEM integrations (Datadog, Splunk)
+import integrations
+
 # --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
 APP_ENV = os.environ.get("APP_ENV", "dev")
 DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() != "false"
@@ -196,7 +199,7 @@ endpoint_anomaly_model = joblib.load(_ENDPOINT_MODEL_PATH) if _ENDPOINT_MODEL_PA
 # Using SQLite3 for all environments (removed PostgreSQL)
 import sqlite3
 import re
-from threading import RLock
+from threading import RLock, Thread
 
 _db_lock = RLock()
 _sqlite_file = Path(__file__).parent / "bola.db"
@@ -1658,6 +1661,10 @@ def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score
         )
 
     broadcast_sse_event("soc_alert", alert_payload)
+    # dispatch_soc_alert is called synchronously from sync request handlers (no event
+    # loop available), so a background thread - not asyncio.create_task - is what keeps
+    # a slow/unreachable SIEM from adding latency to the request that triggered the alert.
+    Thread(target=integrations.forward_soc_alert, args=(alert_payload,), daemon=True).start()
     return alert_payload
 
 
