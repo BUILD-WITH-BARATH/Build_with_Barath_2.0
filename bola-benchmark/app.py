@@ -475,6 +475,7 @@ def init_schema() -> None:
         # integer" error from a dynamic (rec_<uuid>) resource ID.
         "ALTER TABLE assignments ALTER COLUMN record_id TYPE TEXT",
         "ALTER TABLE access_grants ALTER COLUMN record_id TYPE TEXT",
+        "ALTER TABLE audit_events ADD COLUMN risk_score DOUBLE PRECISION DEFAULT 0.0",
     ):
         try:
             with db() as c:
