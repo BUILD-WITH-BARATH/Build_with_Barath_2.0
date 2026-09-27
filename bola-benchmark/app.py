@@ -1270,6 +1270,14 @@ RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"
 QUOTA_ALERT_THRESHOLD_PERCENT = float(os.environ.get("QUOTA_ALERT_THRESHOLD_PERCENT", "80"))
 QUOTA_ALERT_BATCH_SIZE = int(os.environ.get("QUOTA_ALERT_BATCH_SIZE", "50"))
 
+# Phase 5: ROI calculator assumptions. These are illustrative defaults, not verified industry
+# benchmarks - operators should override them with figures specific to their own organization
+# (actual incident-response cost, engineering hourly rate, etc.) for a meaningful estimate.
+ROI_ASSUMED_COST_PER_BREACH_USD = float(os.environ.get("ROI_ASSUMED_COST_PER_BREACH_USD", "50000"))
+ROI_ASSUMED_BREACH_PROBABILITY_PER_ATTACK = float(os.environ.get("ROI_ASSUMED_BREACH_PROBABILITY_PER_ATTACK", "0.02"))
+ROI_ASSUMED_MANUAL_REVIEW_MINUTES_PER_EVENT = float(os.environ.get("ROI_ASSUMED_MANUAL_REVIEW_MINUTES_PER_EVENT", "15"))
+ROI_ASSUMED_ENGINEER_HOURLY_COST_USD = float(os.environ.get("ROI_ASSUMED_ENGINEER_HOURLY_COST_USD", "75"))
+
 # ===== RATE LIMITING MIDDLEWARE (Per-Tenant) =====
 class TenantRateLimitMiddleware(BaseHTTPMiddleware):
     """Per-tenant rate limiting with quota enforcement."""
@@ -3935,6 +3943,151 @@ def get_compliance_report(
         )
 
     return report
+
+
+# ===== Phase 5: Analytics dashboards & ROI calculator =====
+def _require_own_tenant_or_admin(tenant_id: str, identity: tuple[str, str, str]) -> None:
+    _subject, role, caller_tenant_id = identity
+    if tenant_id != caller_tenant_id:
+        require_security_admin(role)
+
+
+@app.get("/tenants/{tenant_id}/analytics/overview")
+def get_analytics_overview(
+    tenant_id: str,
+    window_hours: float = 24.0,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Aggregated security posture for a dashboard: request volume, decision
+    breakdown, and risk-score distribution over a rolling time window."""
+    _require_own_tenant_or_admin(tenant_id, identity)
+
+    now = time.time()
+    cutoff = now - window_hours * 3600
+
+    with db() as c:
+        outcome_rows = c.execute(
+            "SELECT outcome, COUNT(*) as cnt FROM audit_events WHERE tenant_id = %s AND occurred_at > %s GROUP BY outcome",
+            (tenant_id, cutoff)
+        ).fetchall()
+        risk_stats = c.execute(
+            "SELECT AVG(risk_score) as avg_score, MAX(risk_score) as max_score FROM audit_events "
+            "WHERE tenant_id = %s AND occurred_at > %s",
+            (tenant_id, cutoff)
+        ).fetchone()
+        unique_subjects = c.execute(
+            "SELECT COUNT(DISTINCT subject_id) as n FROM audit_events WHERE tenant_id = %s AND occurred_at > %s",
+            (tenant_id, cutoff)
+        ).fetchone()["n"]
+
+    outcome_counts = {row["outcome"]: row["cnt"] for row in outcome_rows}
+
+    return {
+        "tenant_id": tenant_id,
+        "window_hours": window_hours,
+        "generated_at": now,
+        "total_events": sum(outcome_counts.values()),
+        "outcome_breakdown": outcome_counts,
+        "avg_risk_score": round(risk_stats["avg_score"] or 0.0, 2),
+        "max_risk_score": risk_stats["max_score"] or 0.0,
+        "unique_subjects_seen": unique_subjects,
+        "currently_blocked_subjects": engine.blocked_subject_count(tenant_id),
+        "attacks_blocked": outcome_counts.get("blocked", 0),
+    }
+
+
+@app.get("/tenants/{tenant_id}/analytics/threat-summary")
+def get_threat_summary(
+    tenant_id: str,
+    window_hours: float = 24.0,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Phase 4 threat-detection signals over a rolling window: IP event breakdown
+    and IPs whose violation count crossed the reputation threshold."""
+    _require_own_tenant_or_admin(tenant_id, identity)
+
+    now = time.time()
+    cutoff = now - window_hours * 3600
+
+    with db() as c:
+        ip_event_rows = c.execute(
+            "SELECT event_type, COUNT(*) as cnt FROM threat_ip_events "
+            "WHERE tenant_id = %s AND occurred_at > %s GROUP BY event_type",
+            (tenant_id, cutoff)
+        ).fetchall()
+        flagged_ip_rows = c.execute(
+            "SELECT ip_address, COUNT(*) as violations FROM threat_ip_events "
+            "WHERE tenant_id = %s AND occurred_at > %s AND event_type IN ('denied_auth', 'bola_violation') "
+            "GROUP BY ip_address HAVING COUNT(*) >= %s ORDER BY violations DESC LIMIT 20",
+            (tenant_id, cutoff, threat_detection.IP_REPUTATION_VIOLATION_THRESHOLD)
+        ).fetchall()
+
+    return {
+        "tenant_id": tenant_id,
+        "window_hours": window_hours,
+        "generated_at": now,
+        "ip_event_breakdown": {r["event_type"]: r["cnt"] for r in ip_event_rows},
+        "flagged_ips": [{"ip_address": r["ip_address"], "violation_count": r["violations"]} for r in flagged_ip_rows],
+    }
+
+
+@app.get("/tenants/{tenant_id}/analytics/roi")
+def get_roi_estimate(
+    tenant_id: str,
+    window_days: float = 30.0,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Estimated value delivered over a rolling window, computed from observed attacks-blocked
+    counts and operator-configurable assumptions (ROI_ASSUMED_* env vars). This is an estimation
+    tool, not a verified financial figure - see 'methodology_note' and 'assumptions' below."""
+    _require_own_tenant_or_admin(tenant_id, identity)
+
+    now = time.time()
+    cutoff = now - window_days * 86400
+
+    with db() as c:
+        blocked = c.execute(
+            "SELECT COUNT(*) as cnt FROM audit_events WHERE tenant_id = %s AND occurred_at > %s AND outcome = %s",
+            (tenant_id, cutoff, "blocked")
+        ).fetchone()["cnt"]
+        denied = c.execute(
+            "SELECT COUNT(*) as cnt FROM audit_events WHERE tenant_id = %s AND occurred_at > %s AND outcome = %s",
+            (tenant_id, cutoff, "denied")
+        ).fetchone()["cnt"]
+
+    estimated_breaches_avoided = blocked * ROI_ASSUMED_BREACH_PROBABILITY_PER_ATTACK
+    estimated_breach_cost_avoided_usd = estimated_breaches_avoided * ROI_ASSUMED_COST_PER_BREACH_USD
+    manual_review_hours_saved = (blocked + denied) * ROI_ASSUMED_MANUAL_REVIEW_MINUTES_PER_EVENT / 60.0
+    manual_review_cost_saved_usd = manual_review_hours_saved * ROI_ASSUMED_ENGINEER_HOURLY_COST_USD
+
+    return {
+        "tenant_id": tenant_id,
+        "window_days": window_days,
+        "generated_at": now,
+        "methodology_note": (
+            "Estimated value below depends entirely on the configurable assumptions listed in "
+            "'assumptions' - these are illustrative defaults, not verified industry benchmarks. "
+            "Override the ROI_ASSUMED_* environment variables with figures specific to your "
+            "organization for a meaningful number."
+        ),
+        "observed": {
+            "attacks_blocked": blocked,
+            "requests_denied": denied,
+        },
+        "assumptions": {
+            "cost_per_breach_usd": ROI_ASSUMED_COST_PER_BREACH_USD,
+            "breach_probability_per_blocked_attack": ROI_ASSUMED_BREACH_PROBABILITY_PER_ATTACK,
+            "manual_review_minutes_per_event": ROI_ASSUMED_MANUAL_REVIEW_MINUTES_PER_EVENT,
+            "engineer_hourly_cost_usd": ROI_ASSUMED_ENGINEER_HOURLY_COST_USD,
+        },
+        "estimated_value": {
+            "breaches_avoided": round(estimated_breaches_avoided, 3),
+            "breach_cost_avoided_usd": round(estimated_breach_cost_avoided_usd, 2),
+            "manual_review_hours_saved": round(manual_review_hours_saved, 1),
+            "manual_review_cost_saved_usd": round(manual_review_cost_saved_usd, 2),
+            "total_estimated_value_usd": round(estimated_breach_cost_avoided_usd + manual_review_cost_saved_usd, 2),
+        },
+    }
 
 
 @app.post("/forensics/remediation")
