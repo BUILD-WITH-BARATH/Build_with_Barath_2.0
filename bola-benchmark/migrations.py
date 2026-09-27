@@ -5,7 +5,7 @@ Immutable audit logs, multi-tenant quotas, compliance tracking, alerting.
 import time
 import hashlib
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 MIGRATIONS = [
     # Existing migrations (1-9 from app.py init_schema)
     # ... (these run in init_schema)
@@ -152,6 +152,12 @@ MIGRATIONS = [
         -- Phase 4: track how many samples fed each behavioral baseline, so deviation
         -- scoring can wait until a profile is actually mature before flagging anything.
         ALTER TABLE behavioral_profiles ADD COLUMN sample_count INT DEFAULT 0;
+    """),
+
+    (18, """
+        -- Public self-serve signup (POST /v1/signup): an optional contact email,
+        -- since that flow has no other way to follow up with a new tenant.
+        ALTER TABLE tenants ADD COLUMN email TEXT;
     """),
 ]
 

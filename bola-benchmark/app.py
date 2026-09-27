@@ -3181,25 +3181,47 @@ def get_record_graph_risk(record_id: str, identity: tuple[str, str, str] = Depen
 # authorized for the resource (their own object model, not ours) - this
 # endpoint's job is purely the behavioral/risk layer on top of that decision.
 
-@app.post("/v1/tenants")
-@limiter.limit("10/minute")
-def create_tenant(request: Request, payload: dict, x_signup_key: str | None = Header(default=None)) -> dict:
-    if x_signup_key != TENANT_SIGNUP_KEY:
-        raise HTTPException(403, "Invalid signup key")
-    name = payload.get("name")
-    if not name:
-        raise HTTPException(400, "name is required")
+def _create_tenant_record(name: str, email: Optional[str] = None) -> dict:
     tenant_id = secrets.token_hex(8)
     api_key = generate_api_key()
     with db() as c:
-        c.execute("INSERT INTO tenants (id, name, api_key_hash, created_at) VALUES (%s, %s, %s, %s)",
-                  (tenant_id, name, hash_api_key(api_key), time.time()))
+        c.execute("INSERT INTO tenants (id, name, api_key_hash, created_at, email) VALUES (%s, %s, %s, %s, %s)",
+                  (tenant_id, name, hash_api_key(api_key), time.time(), email))
     return {
         "tenant_id": tenant_id,
         "name": name,
         "api_key": api_key,
         "warning": "This API key is shown once and cannot be retrieved again - store it securely.",
     }
+
+
+@app.post("/v1/tenants")
+@limiter.limit("10/minute")
+def create_tenant(request: Request, payload: dict, x_signup_key: str | None = Header(default=None)) -> dict:
+    """Internal/scripted provisioning - requires TENANT_SIGNUP_KEY. For the public,
+    unauthenticated self-serve flow (a signup page on your own website), use POST
+    /v1/signup instead."""
+    if x_signup_key != TENANT_SIGNUP_KEY:
+        raise HTTPException(403, "Invalid signup key")
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(400, "name is required")
+    return _create_tenant_record(name)
+
+
+@app.post("/v1/signup")
+@limiter.limit("5/hour")
+def public_signup(request: Request, payload: dict) -> dict:
+    """Public self-serve tenant signup - no signup key required, meant to be called
+    directly from a website's own signup form. Rate-limited per IP (5/hour) since,
+    unlike /v1/tenants, this has no pre-shared secret gating who can call it."""
+    name = payload.get("name")
+    if not name or not str(name).strip():
+        raise HTTPException(400, "name is required")
+    email = payload.get("email")
+    if email is not None and (not isinstance(email, str) or "@" not in email):
+        raise HTTPException(400, "email must be a valid email address")
+    return _create_tenant_record(str(name).strip(), email)
 
 
 # ===== TENANT QUOTA MANAGEMENT (Phase 2) =====

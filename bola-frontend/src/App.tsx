@@ -9,6 +9,7 @@ import {
 } from './lib/api';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import Login from './pages/Login';
+import Signup from './pages/Signup';
 
 function timeAgo(unixSeconds: number): string {
   if (!unixSeconds) return 'LIVE';
@@ -285,6 +286,12 @@ export default function App() {
 
     return { authVel, anomaly, ipRep, pattern };
   }, [risk, riskScore, attackCount]);
+
+  // Simple pathname-based routing (no router dependency, matching this app's minimal style):
+  // /signup is a standalone public page, reachable whether or not the viewer is logged in.
+  if (window.location.pathname === '/signup') {
+    return <Signup />;
+  }
 
   // Show login page if not authenticated
   if (!authToken) {
