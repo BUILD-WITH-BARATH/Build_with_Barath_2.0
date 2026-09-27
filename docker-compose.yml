@@ -4,11 +4,11 @@
     container_name: cyberaccess-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: cyberaccess
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: ${POSTGRES_DB:-cyberaccess}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,6 +17,52 @@
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: cyberaccess-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cyberaccess-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cyberaccess-grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana-dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    depends_on:
+      - prometheus
+
   backend:
     build:
       context: ./bola-benchmark
@@ -24,14 +70,22 @@
     container_name: cyberaccess-backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://postgres:postgrespassword@postgres:5432/cyberaccess
-      APP_ENV: dev
-      DEMO_MODE: "true"
-      FRONTEND_ORIGIN: "*"
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgrespassword@postgres:5432/cyberaccess}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      APP_ENV: ${APP_ENV:-dev}
+      DEMO_MODE: ${DEMO_MODE:-true}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-*}
+      DEFAULT_REQUESTS_PER_MINUTE: ${DEFAULT_REQUESTS_PER_MINUTE:-1000}
+      REDIS_CACHE_TTL_QUOTAS: ${REDIS_CACHE_TTL_QUOTAS:-60}
+      QUOTA_ALERT_THRESHOLD_PERCENT: ${QUOTA_ALERT_THRESHOLD_PERCENT:-80}
+      QUOTA_ALERT_BATCH_SIZE: ${QUOTA_ALERT_BATCH_SIZE:-50}
+      SMTP_ENABLED: ${SMTP_ENABLED:-false}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   frontend:
@@ -39,11 +93,11 @@
       context: ./bola-frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: http://backend:8000
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://backend:8000}
     container_name: cyberaccess-frontend
     restart: unless-stopped
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5173}:80"
     depends_on:
       - backend
 
@@ -54,14 +108,14 @@
     container_name: cyberaccess-django
     restart: unless-stopped
     environment:
-      CYBERACCESS_ENABLED: "true"
-      CYBERACCESS_API_URL: http://backend:8000
-      CYBERACCESS_API_KEY: "demo-key-12345"
-      CYBERACCESS_FAIL_OPEN: "true"
-      CYBERACCESS_TIMEOUT: "2.0"
-      DJANGO_SETTINGS_MODULE: lost_found_project.settings
+      CYBERACCESS_ENABLED: ${CYBERACCESS_ENABLED:-true}
+      CYBERACCESS_API_URL: ${CYBERACCESS_API_URL:-http://backend:8000}
+      CYBERACCESS_API_KEY: ${CYBERACCESS_API_KEY:-demo-key-12345}
+      CYBERACCESS_FAIL_OPEN: ${CYBERACCESS_FAIL_OPEN:-true}
+      CYBERACCESS_TIMEOUT: ${CYBERACCESS_TIMEOUT:-2.0}
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-lost_found_project.settings}
     ports:
-      - "8001:8001"
+      - "${DJANGO_PORT:-8001}:8001"
     depends_on:
       - backend
     volumes:
@@ -69,3 +123,6 @@
 
 volumes:
   postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
