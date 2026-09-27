@@ -1232,6 +1232,22 @@ _frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").sp
 _cors_origins = _frontend_origins if _frontend_origins else (["*"] if APP_ENV != "prod" else [])
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
+# ===== CONFIGURATION (Externalized to Environment Variables) =====
+# Redis Caching
+REDIS_CACHE_TTL_AUTH_CONTEXT = int(os.environ.get("REDIS_CACHE_TTL_AUTH_CONTEXT", "600"))
+REDIS_CACHE_TTL_RISK_SCORE = int(os.environ.get("REDIS_CACHE_TTL_RISK_SCORE", "300"))
+REDIS_CACHE_TTL_QUOTAS = int(os.environ.get("REDIS_CACHE_TTL_QUOTAS", "60"))
+
+# Rate Limiting & Quotas
+DEFAULT_REQUESTS_PER_MINUTE = int(os.environ.get("DEFAULT_REQUESTS_PER_MINUTE", "1000"))
+DEFAULT_MAX_AUDIT_EVENTS = int(os.environ.get("DEFAULT_MAX_AUDIT_EVENTS", "1000000"))
+DEFAULT_AUDIT_RETENTION_DAYS = int(os.environ.get("DEFAULT_AUDIT_RETENTION_DAYS", "365"))
+DEFAULT_RISK_THRESHOLD_BLOCK = int(os.environ.get("DEFAULT_RISK_THRESHOLD_BLOCK", "90"))
+DEFAULT_RISK_THRESHOLD_WARN = int(os.environ.get("DEFAULT_RISK_THRESHOLD_WARN", "70"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
+QUOTA_ALERT_THRESHOLD_PERCENT = float(os.environ.get("QUOTA_ALERT_THRESHOLD_PERCENT", "80"))
+QUOTA_ALERT_BATCH_SIZE = int(os.environ.get("QUOTA_ALERT_BATCH_SIZE", "50"))
+
 # ===== RATE LIMITING MIDDLEWARE (Per-Tenant) =====
 class TenantRateLimitMiddleware(BaseHTTPMiddleware):
     """Per-tenant rate limiting with quota enforcement."""
@@ -1256,11 +1272,11 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
                         (tenant_id,)
                     ).fetchone()
                     quota_config = json.dumps({
-                        "requests_per_minute": result["requests_per_minute"] if result else 1000
+                        "requests_per_minute": result["requests_per_minute"] if result else DEFAULT_REQUESTS_PER_MINUTE
                     })
-                    cache_set(quota_key, quota_config, ttl_seconds=60)
+                    cache_set(quota_key, quota_config, ttl_seconds=REDIS_CACHE_TTL_QUOTAS)
             except Exception:
-                quota_config = json.dumps({"requests_per_minute": 1000})
+                quota_config = json.dumps({"requests_per_minute": DEFAULT_REQUESTS_PER_MINUTE})
 
         quota = json.loads(quota_config)
         rpm_limit = quota["requests_per_minute"]
@@ -1271,8 +1287,8 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
             try:
                 current = redis_client.incr(rate_limit_key)
                 if current == 1:
-                    # New key, set expiry to 60 seconds
-                    redis_client.expire(rate_limit_key, 60)
+                    # New key, set expiry based on rate limit window
+                    redis_client.expire(rate_limit_key, RATE_LIMIT_WINDOW_SECONDS)
 
                 # Check if over limit
                 if current > rpm_limit:
@@ -1282,19 +1298,19 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
                             "error": "Rate limit exceeded",
                             "limit": rpm_limit,
                             "current": current,
-                            "retry_after": 60
+                            "retry_after": RATE_LIMIT_WINDOW_SECONDS
                         }),
                         status_code=429,
                         media_type="application/json",
-                        headers={"Retry-After": "60"}
+                        headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)}
                     )
 
                 # Update quota usage metric
                 usage_percent = (current / rpm_limit) * 100
                 tenant_quota_usage.labels(tenant_id=tenant_id).set(usage_percent)
 
-                # Alert if >80% quota used
-                if usage_percent > 80 and current % 50 == 0:  # Alert every 50 requests over 80%
+                # Alert if quota threshold exceeded
+                if usage_percent > QUOTA_ALERT_THRESHOLD_PERCENT and current % QUOTA_ALERT_BATCH_SIZE == 0:
                     try:
                         with db() as c:
                             c.execute(

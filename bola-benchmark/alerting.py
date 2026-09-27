@@ -19,7 +19,9 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_ENABLED = os.environ.get("SMTP_ENABLED", "false").lower() == "true"
 
 # Slack configuration
-SLACK_TIMEOUT = 5  # seconds
+ALERT_SLACK_TIMEOUT = float(os.environ.get("ALERT_SLACK_TIMEOUT", "5"))
+ALERT_EMAIL_TIMEOUT = float(os.environ.get("ALERT_EMAIL_TIMEOUT", "10"))
+ALERT_WEBHOOK_TIMEOUT = float(os.environ.get("ALERT_WEBHOOK_TIMEOUT", "5"))
 
 
 class AlertDispatcher:
@@ -109,7 +111,7 @@ class AlertDispatcher:
                 ]
             }
 
-            async with httpx.AsyncClient(timeout=SLACK_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=ALERT_SLACK_TIMEOUT) as client:
                 response = await client.post(webhook_url, json=payload)
                 return response.status_code == 200
         except Exception as e:
@@ -123,7 +125,7 @@ class AlertDispatcher:
     ) -> bool:
         """Send generic webhook POST."""
         try:
-            async with httpx.AsyncClient(timeout=SLACK_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=ALERT_WEBHOOK_TIMEOUT) as client:
                 response = await client.post(webhook_url, json=event)
                 return response.status_code in [200, 201, 202]
         except Exception as e:
