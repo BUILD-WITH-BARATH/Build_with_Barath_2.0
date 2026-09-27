@@ -24,6 +24,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+# Several startup/log messages below use emoji (checkmarks, warning signs). On Windows,
+# a console left on its default legacy codepage (cp1252 etc., not UTF-8) raises
+# UnicodeEncodeError on those prints and crashes the whole process before it can even
+# bind a port. reconfigure() (Python 3.7+) is a no-op if already UTF-8 and always safe
+# to call on a real stdout/stderr stream.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import bcrypt
 import jwt
 import joblib

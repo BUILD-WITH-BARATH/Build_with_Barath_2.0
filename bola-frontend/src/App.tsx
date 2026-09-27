@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import logoImg from './assets/logo.png';
 import {
   getConfig, getStats, getRisk, getEvents, runSimulation, SCENARIOS,
+  getAnalyticsOverview, getThreatSummary, getRoiEstimate,
   type ConfigResp, type StatsResp, type RiskResp, type AuditEvent,
+  type AnalyticsOverview, type ThreatSummary, type RoiEstimate,
   API_BASE,
 } from './lib/api';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -28,6 +30,9 @@ export default function App() {
   const [simRunning, setSimRunning] = useState<string | null>(null);
   const [simVerdict, setSimVerdict] = useState<string | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
+  const [threatSummary, setThreatSummary] = useState<ThreatSummary | null>(null);
+  const [roi, setRoi] = useState<RoiEstimate | null>(null);
   const [utcTime, setUtcTime] = useState('');
   const [activeBtn, setActiveBtn] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -67,6 +72,14 @@ export default function App() {
       setEvents(await getEvents());
     } catch {
       // audit timeline needs security_admin auth; leave prior state on failure
+    }
+    try {
+      const [a, t, r] = await Promise.all([getAnalyticsOverview(), getThreatSummary(), getRoiEstimate()]);
+      setAnalytics(a);
+      setThreatSummary(t);
+      setRoi(r);
+    } catch {
+      // Phase 4/5 endpoints need security_admin auth too; leave prior state on failure
     }
   };
 
@@ -995,6 +1008,127 @@ export default function App() {
           </ErrorBoundary>
         </div>
         {/* END: Column 3 */}
+
+        {/* ========================================================================= */}
+        {/* ROW 2: PHASE 4/5 INTELLIGENCE (Analytics, Threat Detection, ROI) - full width */}
+        {/* ========================================================================= */}
+        <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 md:gap-5">
+          {/* BEGIN: AnalyticsOverviewCard (Phase 5) */}
+          <ErrorBoundary label="Analytics Overview">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-cyan-500/40 via-blue-500/20 to-transparent"></div>
+              <div className="flex items-center justify-between mb-3 pb-2 border-b border-cyber-border/60">
+                <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                  Analytics Overview
+                </h2>
+                <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                  {analytics ? `${analytics.window_hours}h window` : '24h window'}
+                </span>
+              </div>
+              {analytics ? (
+                <div className="grid grid-cols-2 gap-2.5 text-center">
+                  <div className="rounded-lg bg-[#0a0d14] border border-cyber-border p-2.5">
+                    <div className="font-mono text-2xl font-extrabold text-slate-100">{analytics.total_events}</div>
+                    <div className="font-mono text-[9px] uppercase text-cyber-textMuted tracking-wider mt-1">Total Events</div>
+                  </div>
+                  <div className="rounded-lg bg-cyber-crimsonMuted/20 border border-cyber-crimson/40 p-2.5">
+                    <div className="font-mono text-2xl font-extrabold text-cyber-crimson">{analytics.attacks_blocked}</div>
+                    <div className="font-mono text-[9px] uppercase text-rose-400 tracking-wider mt-1">Attacks Blocked</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0a0d14] border border-cyber-border p-2.5">
+                    <div className="font-mono text-2xl font-extrabold text-slate-100">{analytics.avg_risk_score.toFixed(1)}</div>
+                    <div className="font-mono text-[9px] uppercase text-cyber-textMuted tracking-wider mt-1">Avg Risk Score</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0a0d14] border border-cyber-border p-2.5">
+                    <div className="font-mono text-2xl font-extrabold text-slate-100">{analytics.unique_subjects_seen}</div>
+                    <div className="font-mono text-[9px] uppercase text-cyber-textMuted tracking-wider mt-1">Unique Subjects</div>
+                  </div>
+                </div>
+              ) : (
+                <p className="font-mono text-[11px] text-cyber-textMuted text-center py-6">Loading...</p>
+              )}
+            </section>
+          </ErrorBoundary>
+          {/* END: AnalyticsOverviewCard */}
+
+          {/* BEGIN: ThreatIntelCard (Phase 4) */}
+          <ErrorBoundary label="Threat Intelligence">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-amber-500/40 via-rose-500/20 to-transparent"></div>
+              <div className="flex items-center justify-between mb-3 pb-2 border-b border-cyber-border/60">
+                <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                  Threat Intelligence
+                </h2>
+                <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                  IP Reputation
+                </span>
+              </div>
+              {threatSummary ? (
+                threatSummary.flagged_ips.length > 0 ? (
+                  <div className="space-y-1.5 overflow-y-auto max-h-40">
+                    {threatSummary.flagged_ips.map((ip) => (
+                      <div key={ip.ip_address} className="flex items-center justify-between rounded-lg bg-cyber-crimsonMuted/20 border border-cyber-crimson/40 px-2.5 py-1.5">
+                        <span className="font-mono text-[11px] text-slate-200 truncate">{ip.ip_address}</span>
+                        <span className="font-mono text-[10px] font-bold text-cyber-crimson">{ip.violation_count} violations</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center py-6 text-center">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 mb-2"></span>
+                    <p className="font-mono text-[11px] text-emerald-400">No flagged IPs</p>
+                    <p className="font-mono text-[9px] text-cyber-textMuted mt-1">
+                      {Object.entries(threatSummary.ip_event_breakdown).map(([k, v]) => `${k}: ${v}`).join(' · ') || 'No IP events yet'}
+                    </p>
+                  </div>
+                )
+              ) : (
+                <p className="font-mono text-[11px] text-cyber-textMuted text-center py-6">Loading...</p>
+              )}
+            </section>
+          </ErrorBoundary>
+          {/* END: ThreatIntelCard */}
+
+          {/* BEGIN: RoiCalculatorCard (Phase 5) */}
+          <ErrorBoundary label="ROI Calculator">
+            <section className="rounded-xl bg-cyber-panel border border-cyber-border p-3 sm:p-4 md:p-5 relative shadow-tactical flex flex-col">
+              <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-emerald-500/40 via-cyan-500/20 to-transparent"></div>
+              <div className="flex items-center justify-between mb-3 pb-2 border-b border-cyber-border/60">
+                <h2 className="font-mono text-xs uppercase font-bold tracking-widest text-slate-200">
+                  ROI Estimate
+                </h2>
+                <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#131926] text-cyber-textMuted border border-cyber-border">
+                  {roi ? `${roi.window_days}d window` : '30d window'}
+                </span>
+              </div>
+              {roi ? (
+                <>
+                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-3 text-center mb-2.5">
+                    <div className="font-mono text-2xl font-extrabold text-emerald-400">
+                      ${roi.estimated_value.total_estimated_value_usd.toLocaleString()}
+                    </div>
+                    <div className="font-mono text-[9px] uppercase text-emerald-400/80 tracking-wider mt-1">Estimated Value Delivered</div>
+                  </div>
+                  <div className="flex items-center justify-between font-mono text-[10px] text-cyber-textMuted mb-1">
+                    <span>Manual review hours saved</span>
+                    <span className="text-slate-200 font-semibold">{roi.estimated_value.manual_review_hours_saved}h</span>
+                  </div>
+                  <div className="flex items-center justify-between font-mono text-[10px] text-cyber-textMuted">
+                    <span>Breaches avoided (est.)</span>
+                    <span className="text-slate-200 font-semibold">{roi.estimated_value.breaches_avoided}</span>
+                  </div>
+                  <p className="font-mono text-[8px] text-cyber-textMuted/70 mt-2.5 pt-2 border-t border-cyber-border/40 leading-relaxed">
+                    Illustrative estimate from configurable assumptions, not a verified benchmark.
+                  </p>
+                </>
+              ) : (
+                <p className="font-mono text-[11px] text-cyber-textMuted text-center py-6">Loading...</p>
+              )}
+            </section>
+          </ErrorBoundary>
+          {/* END: RoiCalculatorCard */}
+        </div>
+        {/* END: Row 2 */}
       </main>
       {/* END: DashboardLayout */}
     </div>
