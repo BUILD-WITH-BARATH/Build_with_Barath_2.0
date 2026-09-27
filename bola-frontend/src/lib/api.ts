@@ -171,12 +171,26 @@ export interface SignupResult {
   warning: string;
 }
 
+const SIGNUP_TIMEOUT_MS = 10000;
+
 export async function signup(name: string, email?: string): Promise<SignupResult> {
-  const res = await fetch(`${API_BASE}/v1/signup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(email ? { name, email } : { name }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/v1/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(email ? { name, email } : { name }),
+      signal: AbortSignal.timeout(SIGNUP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error(
+        `No response after ${SIGNUP_TIMEOUT_MS / 1000}s. The backend may be unreachable, or something ` +
+        `on this network (antivirus/firewall) is blocking the request - see the backend console for whether it arrived at all.`
+      );
+    }
+    throw err;
+  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `Signup failed (${res.status})`);
