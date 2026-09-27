@@ -79,12 +79,6 @@ BOLA_WEIGHT_GET = float(os.environ.get("BOLA_WEIGHT_GET", "1.0"))
 BOLA_MAX_BATCH_SIZE = int(os.environ.get("BOLA_MAX_BATCH_SIZE", "50"))
 BOLA_ASYNC_JOB_TTL = float(os.environ.get("BOLA_ASYNC_JOB_TTL", "3600.0"))
 
-# PostgreSQL for multi-tenant production use
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:npg_KBeCkz3w0JhT@ep-red-bar-aej2jt2i-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-)
-
 # Redis for caching (optional, graceful degradation if unavailable)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 redis_client = None
