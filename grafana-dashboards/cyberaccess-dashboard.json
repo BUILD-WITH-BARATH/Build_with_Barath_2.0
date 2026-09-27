@@ -1,0 +1,79 @@
+{
+  "dashboard": {
+    "title": "CyberAccess BOLA Defense",
+    "panels": [
+      {
+        "title": "Authorization Decisions/sec",
+        "targets": [
+          {
+            "expr": "rate(authorize_decisions_total[1m])",
+            "legendFormat": "{{decision}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Authorization Latency (p99)",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, authorize_latency_seconds)",
+            "legendFormat": "{{tenant_id}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Risk Score Distribution",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, risk_score_distribution)",
+            "legendFormat": "p95"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "False Positives (Blocks/min)",
+        "targets": [
+          {
+            "expr": "rate(false_positives_total[1m])",
+            "legendFormat": "{{tenant_id}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Audit Events Stored",
+        "targets": [
+          {
+            "expr": "audit_events_stored_total",
+            "legendFormat": "{{tenant_id}}"
+          }
+        ],
+        "type": "stat"
+      },
+      {
+        "title": "Tenant Quota Usage (%)",
+        "targets": [
+          {
+            "expr": "tenant_quota_usage_percent",
+            "legendFormat": "{{tenant_id}}"
+          }
+        ],
+        "type": "gauge"
+      },
+      {
+        "title": "Redis Cache Hit Rate",
+        "targets": [
+          {
+            "expr": "rate(redis_cache_hits_total[5m]) / (rate(redis_cache_hits_total[5m]) + rate(redis_cache_misses_total[5m]))",
+            "legendFormat": "{{cache_type}}"
+          }
+        ],
+        "type": "gauge"
+      }
+    ],
+    "timezone": "browser",
+    "refresh": "10s"
+  }
+}
