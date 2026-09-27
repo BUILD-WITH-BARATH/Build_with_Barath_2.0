@@ -220,6 +220,8 @@ class SQLiteCursorWrapper:
         s = sql.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
         s = s.replace("DOUBLE PRECISION", "REAL")
         s = s.replace("BOOLEAN", "INTEGER")
+        s = re.sub(r'\bNOW\(\)', 'CURRENT_TIMESTAMP', s, flags=re.IGNORECASE)
+        s = re.sub(r'\bTEXT\[\]', 'TEXT', s)
         s = re.sub(r'\ballowed\s*=\s*false\b', 'allowed = 0', s, flags=re.IGNORECASE)
         s = re.sub(r'\ballowed\s*=\s*true\b', 'allowed = 1', s, flags=re.IGNORECASE)
         s = re.sub(r'\bctid\b', 'rowid', s)
@@ -1283,6 +1285,7 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
 
         # Check rate limit using Redis
         rate_limit_key = f"ratelimit:{tenant_id}"
+        current = 0
         if redis_client:
             try:
                 current = redis_client.incr(rate_limit_key)
@@ -1338,7 +1341,7 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
         response.headers["X-Tenant-ID"] = tenant_id
-        response.headers["X-Quota-Used"] = str(current if redis_client else 0)
+        response.headers["X-Quota-Used"] = str(current)
         response.headers["X-Quota-Limit"] = str(rpm_limit)
         return response
 

@@ -5,7 +5,7 @@ Immutable audit logs, multi-tenant quotas, compliance tracking, alerting.
 import time
 import hashlib
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 16
 MIGRATIONS = [
     # Existing migrations (1-9 from app.py init_schema)
     # ... (these run in init_schema)
@@ -14,7 +14,7 @@ MIGRATIONS = [
     (10, """
         -- Make audit_events append-only: no UPDATE/DELETE allowed
         CREATE TABLE IF NOT EXISTS audit_events_v2 (
-            id BIGSERIAL PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             tenant_id TEXT NOT NULL,
             occurred_at DOUBLE PRECISION NOT NULL,
             subject_id TEXT NOT NULL,
@@ -121,6 +121,32 @@ MIGRATIONS = [
             PRIMARY KEY (tenant_id, subject_id, hour)
         );
     """),
+
+    (16, """
+        -- Phase 4: Advanced threat detection - IP reputation history
+        CREATE TABLE IF NOT EXISTS threat_ip_events (
+            id SERIAL PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            ip_address TEXT NOT NULL,
+            subject_id TEXT,
+            event_type TEXT NOT NULL,  -- 'denied_auth', 'bola_violation', 'rate_limited', 'request'
+            occurred_at DOUBLE PRECISION NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_threat_ip_tenant_ip
+            ON threat_ip_events(tenant_id, ip_address, occurred_at DESC);
+
+        -- Phase 4: Geo-velocity ("impossible travel") tracking, last known location per subject
+        CREATE TABLE IF NOT EXISTS threat_geo_history (
+            tenant_id TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            ip_address TEXT NOT NULL,
+            latitude DOUBLE PRECISION NOT NULL,
+            longitude DOUBLE PRECISION NOT NULL,
+            country TEXT,
+            observed_at DOUBLE PRECISION NOT NULL,
+            PRIMARY KEY (tenant_id, subject_id)
+        );
+    """),
 ]
 
 
@@ -134,12 +160,13 @@ def apply_migrations(db_connection):
                     "SELECT value FROM system_config WHERE key = %s",
                     ("schema_version",)
                 ).fetchone()
-                current_version = int(result["value"]) if result else 0
+                current_version = int(result["value"]) if result else 9  # Assume v9 (from init_schema)
             except Exception:
                 current_version = 9  # Assume v9 (from init_schema)
 
-        # Apply pending migrations
-        for version, sql in MIGRATIONS[current_version:]:
+        # Apply pending migrations, keyed by version number (not list position)
+        pending = [(version, sql) for version, sql in MIGRATIONS if version > current_version]
+        for version, sql in pending:
             print(f"[migration] Applying v{version}...")
             try:
                 with db_connection() as c:
