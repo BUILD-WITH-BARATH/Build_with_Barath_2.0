@@ -49,6 +49,9 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, REGIST
 # Database migrations
 from migrations import apply_migrations, compute_audit_hash
 
+# Alerting system
+from alerting import dispatch_alerts
+
 # --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
 APP_ENV = os.environ.get("APP_ENV", "dev")
 DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() != "false"
@@ -1301,6 +1304,17 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
                                 (tenant_id, time.time(), "system", "quota_alert", None, "alert", "quota_warning",
                                  f"Tenant quota usage at {usage_percent:.1f}% ({current}/{rpm_limit} requests/min)", 0.0)
                             )
+                        # Dispatch alerts asynchronously (fire and forget)
+                        asyncio.create_task(
+                            dispatch_alerts(
+                                tenant_id,
+                                "quota_warning",
+                                f"Quota Usage Alert: {usage_percent:.0f}%",
+                                f"Your CyberAccess tenant is using {usage_percent:.1f}% of its quota ({current}/{rpm_limit} requests/min).",
+                                severity="warning",
+                                db=db
+                            )
+                        )
                     except Exception:
                         pass
             except Exception:
@@ -3169,6 +3183,112 @@ def get_tenant_quota_usage(tenant_id: str, identity: tuple[str, str, str] = Depe
             "audit_events_percent": (audit_count / quota_limits["max_stored_audit_events"]) * 100
         }
     }
+
+
+# ===== ALERT CHANNEL MANAGEMENT (Phase 3) =====
+@app.post("/tenants/{tenant_id}/alert-channels")
+def create_alert_channel(
+    tenant_id: str,
+    payload: dict,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Create an alert channel (Slack, Email, Webhook) for a tenant."""
+    _subject, role, current_tenant = identity
+
+    # Allow admins to create for any tenant, others only their own
+    if role != ADMIN_ROLE and current_tenant != tenant_id:
+        raise HTTPException(403, "Insufficient permissions")
+
+    channel_type = payload.get("channel_type")  # "slack", "email", "webhook"
+    channel_config = payload.get("channel_config", {})  # {"url": "...", "address": "...", etc}
+
+    if channel_type not in ["slack", "email", "webhook"]:
+        raise HTTPException(400, f"Invalid channel_type: {channel_type}")
+
+    channel_id = secrets.token_hex(8)
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO alert_channels (id, tenant_id, channel_type, channel_config, is_active) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (channel_id, tenant_id, channel_type, json.dumps(channel_config), True)
+        )
+
+    return {"channel_id": channel_id, "status": "created"}
+
+
+@app.get("/tenants/{tenant_id}/alert-channels")
+def list_alert_channels(
+    tenant_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """List all alert channels for a tenant."""
+    _subject, role, current_tenant = identity
+
+    if role != ADMIN_ROLE and current_tenant != tenant_id:
+        raise HTTPException(403, "Insufficient permissions")
+
+    with db() as c:
+        channels = c.execute(
+            "SELECT id, channel_type, is_active FROM alert_channels WHERE tenant_id = %s ORDER BY id DESC",
+            (tenant_id,)
+        ).fetchall()
+
+    return {
+        "tenant_id": tenant_id,
+        "channels": [
+            {
+                "id": ch["id"],
+                "type": ch["channel_type"],
+                "active": ch["is_active"]
+            }
+            for ch in channels
+        ]
+    }
+
+
+@app.delete("/tenants/{tenant_id}/alert-channels/{channel_id}")
+def delete_alert_channel(
+    tenant_id: str,
+    channel_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Delete an alert channel."""
+    _subject, role, _current_tenant = identity
+    require_security_admin(role)
+
+    with db() as c:
+        c.execute(
+            "DELETE FROM alert_channels WHERE id = %s AND tenant_id = %s",
+            (channel_id, tenant_id)
+        )
+
+    return {"status": "deleted", "channel_id": channel_id}
+
+
+@app.post("/tenants/{tenant_id}/test-alert")
+async def test_alert(
+    tenant_id: str,
+    identity: tuple[str, str, str] = Depends(get_current_identity)
+) -> dict:
+    """Send a test alert to all active channels for a tenant."""
+    _subject, role, current_tenant = identity
+
+    if role != ADMIN_ROLE and current_tenant != tenant_id:
+        raise HTTPException(403, "Insufficient permissions")
+
+    # Dispatch test alert
+    await dispatch_alerts(
+        tenant_id,
+        "test",
+        "CyberAccess Test Alert",
+        "This is a test alert from your CyberAccess configuration. "
+        "If you received this, your alert channels are working correctly.",
+        severity="info",
+        db=db
+    )
+
+    return {"status": "test_alert_sent", "tenant_id": tenant_id}
 
 
 @app.get("/toggle-defense-status")
