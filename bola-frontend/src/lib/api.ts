@@ -164,6 +164,26 @@ export async function getEvents(): Promise<AuditEvent[]> {
   }));
 }
 
+export interface SignupResult {
+  tenant_id: string;
+  name: string;
+  api_key: string;
+  warning: string;
+}
+
+export async function signup(name: string, email?: string): Promise<SignupResult> {
+  const res = await fetch(`${API_BASE}/v1/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(email ? { name, email } : { name }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Signup failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function getAnalyticsOverview(tenantId = 'demo', windowHours = 24): Promise<AnalyticsOverview> {
   const token = await adminToken();
   const res = await fetch(`${API_BASE}/tenants/${encodeURIComponent(tenantId)}/analytics/overview?window_hours=${windowHours}`, {

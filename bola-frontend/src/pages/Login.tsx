@@ -110,6 +110,10 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             <p className="text-xs text-slate-500 text-center">
               Default: <span className="text-slate-300">security_admin</span> / <span className="text-slate-300">admin_changeme123</span>
             </p>
+            <p className="text-xs text-slate-500 text-center mt-3">
+              Integrating CyberAccess into your own app?{' '}
+              <a href="/signup" className="text-cyber-cyan hover:underline">Get an API key</a>
+            </p>
           </div>
 
           {/* Security Notice */}

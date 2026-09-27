@@ -1944,18 +1944,21 @@ def get_record(record_id: str, request: Request, response: Response,
     response.headers["X-Risk-Score"] = str(score)
     response.headers["X-Risk-Category"] = category
 
+    now_ts = time.time()
+    threat_intel = _run_threat_detection(request, tenant_id, subject, "records", decision, now_ts)
+
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
         record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "signals": signals,
                                          "explanations": explanations, "score": score, "category": category,
-                                         "soc_alert_dispatched": True},
+                                         "soc_alert_dispatched": True, "threat_intel": threat_intel},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     if authorization is None:
         record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
-        raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category},
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category, "threat_intel": threat_intel},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     with db() as c:
@@ -1964,7 +1967,7 @@ def get_record(record_id: str, request: Request, response: Response,
     record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations, risk_score=score)
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
-            "score": score, "category": category}
+            "score": score, "category": category, "threat_intel": threat_intel}
 
 
 # ============================================================================
@@ -2947,6 +2950,8 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
 def _classify_event(record_id: str, decision: str) -> str:
     """Classify event type for timeline display."""
     rec = str(record_id).lower()
+    if rec == "threat_signal":
+        return "threat_signal"
     if "timer" in rec or "quarantine" in rec:
         return "quarantine_timer"
     if "admin" in rec:
@@ -3176,25 +3181,47 @@ def get_record_graph_risk(record_id: str, identity: tuple[str, str, str] = Depen
 # authorized for the resource (their own object model, not ours) - this
 # endpoint's job is purely the behavioral/risk layer on top of that decision.
 
-@app.post("/v1/tenants")
-@limiter.limit("10/minute")
-def create_tenant(request: Request, payload: dict, x_signup_key: str | None = Header(default=None)) -> dict:
-    if x_signup_key != TENANT_SIGNUP_KEY:
-        raise HTTPException(403, "Invalid signup key")
-    name = payload.get("name")
-    if not name:
-        raise HTTPException(400, "name is required")
+def _create_tenant_record(name: str, email: Optional[str] = None) -> dict:
     tenant_id = secrets.token_hex(8)
     api_key = generate_api_key()
     with db() as c:
-        c.execute("INSERT INTO tenants (id, name, api_key_hash, created_at) VALUES (%s, %s, %s, %s)",
-                  (tenant_id, name, hash_api_key(api_key), time.time()))
+        c.execute("INSERT INTO tenants (id, name, api_key_hash, created_at, email) VALUES (%s, %s, %s, %s, %s)",
+                  (tenant_id, name, hash_api_key(api_key), time.time(), email))
     return {
         "tenant_id": tenant_id,
         "name": name,
         "api_key": api_key,
         "warning": "This API key is shown once and cannot be retrieved again - store it securely.",
     }
+
+
+@app.post("/v1/tenants")
+@limiter.limit("10/minute")
+def create_tenant(request: Request, payload: dict, x_signup_key: str | None = Header(default=None)) -> dict:
+    """Internal/scripted provisioning - requires TENANT_SIGNUP_KEY. For the public,
+    unauthenticated self-serve flow (a signup page on your own website), use POST
+    /v1/signup instead."""
+    if x_signup_key != TENANT_SIGNUP_KEY:
+        raise HTTPException(403, "Invalid signup key")
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(400, "name is required")
+    return _create_tenant_record(name)
+
+
+@app.post("/v1/signup")
+@limiter.limit("5/hour")
+def public_signup(request: Request, payload: dict) -> dict:
+    """Public self-serve tenant signup - no signup key required, meant to be called
+    directly from a website's own signup form. Rate-limited per IP (5/hour) since,
+    unlike /v1/tenants, this has no pre-shared secret gating who can call it."""
+    name = payload.get("name")
+    if not name or not str(name).strip():
+        raise HTTPException(400, "name is required")
+    email = payload.get("email")
+    if email is not None and (not isinstance(email, str) or "@" not in email):
+        raise HTTPException(400, "email must be a valid email address")
+    return _create_tenant_record(str(name).strip(), email)
 
 
 # ===== TENANT QUOTA MANAGEMENT (Phase 2) =====
