@@ -885,6 +885,10 @@ export default function App() {
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
                       <span className="text-slate-300">Denied</span>
                     </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400"></span>
+                      <span className="text-slate-300">Threat Signal</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -914,6 +918,7 @@ export default function App() {
               ) : (
                 <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[640px] pr-1">
                   {events.map((ev) => {
+                    const isThreatSignal = ev.event_type === 'threat_signal' || ev.record_id === 'threat_signal';
                     const isTimer = ev.event_type === 'quarantine_timer' || ev.record_id?.includes('timer') || ev.record_id?.includes('quarantine');
                     const isAdmin = ev.event_type === 'admin_probe' || ev.record_id?.includes('admin');
                     const isBlocked = ev.outcome === 'blocked';
@@ -924,7 +929,9 @@ export default function App() {
                       <div
                         key={ev.id}
                         className={`p-2.5 rounded-lg border text-xs font-mono transition-all hover:translate-x-0.5 ${
-                          isTimer
+                          isThreatSignal
+                            ? 'bg-fuchsia-950/30 border-fuchsia-500/50'
+                            : isTimer
                             ? 'bg-cyan-950/25 border-cyan-500/50'
                             : isAdmin
                             ? 'bg-red-950/40 border-red-500/70'
@@ -942,7 +949,7 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2 flex-1">
                             <span className={`w-1.5 h-1.5 rounded-full ${
-                              isTimer ? 'bg-cyan-400 animate-pulse' : isAdmin ? 'bg-red-500 animate-pulse' : isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
+                              isThreatSignal ? 'bg-fuchsia-400 animate-pulse' : isTimer ? 'bg-cyan-400 animate-pulse' : isAdmin ? 'bg-red-500 animate-pulse' : isBlocked ? 'bg-rose-500' : isCanary ? 'bg-pink-400' : is404 ? 'bg-violet-400' : isDenied ? 'bg-amber-500' : 'bg-emerald-400'
                             }`}></span>
                             <span className="font-bold text-slate-200 truncate">{ev.subject_id}</span>
                           </div>
@@ -951,7 +958,9 @@ export default function App() {
                         <div className="mt-1.5 space-y-1">
                           <div className="flex items-center gap-2">
                             <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider flex-shrink-0 ${
-                              isTimer
+                              isThreatSignal
+                                ? 'bg-fuchsia-500/20 text-fuchsia-300'
+                                : isTimer
                                 ? 'bg-cyan-500/20 text-cyan-300'
                                 : isAdmin
                                 ? 'bg-red-500/30 text-red-200'
@@ -965,10 +974,11 @@ export default function App() {
                                 ? 'bg-amber-500/20 text-amber-300'
                                 : 'bg-emerald-500/10 text-emerald-400'
                             }`}>
-                              {isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
+                              {isThreatSignal ? 'THREAT' : isTimer ? 'QUARANTINE' : isAdmin ? 'ADMIN' : isBlocked ? 'BLOCKED' : isCanary ? 'CANARY' : is404 ? 'PROBE' : isDenied ? 'DENIED' : 'ALLOWED'}
                             </span>
                             <span className="text-[9px] text-cyber-textMuted flex-1">
-                              {isTimer ? (() => {
+                              {isThreatSignal ? (ev.explanation || 'Threat signal detected').split(' | ')[0] :
+                               isTimer ? (() => {
                                 const strikeMatch = ev.explanation?.match(/Strike (\d+)\/3/);
                                 const strikeNum = strikeMatch ? strikeMatch[1] : '?';
                                 return `Strike ${strikeNum}/3 remaining`;
@@ -984,6 +994,7 @@ export default function App() {
                           <div className="text-[8px] text-cyber-textMuted pl-3.5 flex items-center gap-2">
                             <span>
                               Triggered: {
+                                isThreatSignal ? 'ip/geo/tls/behavioral' :
                                 is404 ? 'enum' :
                                 isCanary ? 'honeypot' :
                                 isAdmin ? 'admin' :

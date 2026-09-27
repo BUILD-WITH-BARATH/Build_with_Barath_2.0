@@ -1944,18 +1944,21 @@ def get_record(record_id: str, request: Request, response: Response,
     response.headers["X-Risk-Score"] = str(score)
     response.headers["X-Risk-Category"] = category
 
+    now_ts = time.time()
+    threat_intel = _run_threat_detection(request, tenant_id, subject, "records", decision, now_ts)
+
     if decision == "block":
         explanations = ["Access blocked: BOLA-style behavior was detected."] + explanations
         record_audit(tenant_id, subject, record_id, authorization, decision, "blocked", explanations, risk_score=score)
         dispatch_soc_alert(tenant_id, subject, record_id, score, category, signals)
         raise HTTPException(403, detail={"outcome": "blocked", "reason": "BOLA-style behavior detected", "signals": signals,
                                          "explanations": explanations, "score": score, "category": category,
-                                         "soc_alert_dispatched": True},
+                                         "soc_alert_dispatched": True, "threat_intel": threat_intel},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     if authorization is None:
         record_audit(tenant_id, subject, record_id, authorization, decision, "denied", explanations, risk_score=score)
-        raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category},
+        raise HTTPException(403, detail={"outcome": "denied", "reason": "No valid object-level authorization", "explanations": explanations, "score": score, "category": category, "threat_intel": threat_intel},
                             headers={"X-Detector-Decision": decision, "X-Detector-Signals": ",".join(signals),
                                      "X-Graph-Unseen": str(unseen).lower(), "X-Risk-Score": str(score), "X-Risk-Category": category})
     with db() as c:
@@ -1964,7 +1967,7 @@ def get_record(record_id: str, request: Request, response: Response,
     record_audit(tenant_id, subject, record_id, authorization, decision, "allowed", explanations, risk_score=score)
     return {"record": dict(row), "authorization": authorization, "graph_edge_known": not unseen,
             "delegation": access["delegation"], "decision": {"outcome": "allowed", "explanations": explanations},
-            "score": score, "category": category}
+            "score": score, "category": category, "threat_intel": threat_intel}
 
 
 # ============================================================================
@@ -2947,6 +2950,8 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
 def _classify_event(record_id: str, decision: str) -> str:
     """Classify event type for timeline display."""
     rec = str(record_id).lower()
+    if rec == "threat_signal":
+        return "threat_signal"
     if "timer" in rec or "quarantine" in rec:
         return "quarantine_timer"
     if "admin" in rec:
