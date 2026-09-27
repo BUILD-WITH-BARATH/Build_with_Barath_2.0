@@ -4,17 +4,31 @@ export const API_BASE = raw.startsWith('http') ? raw.replace(/\/$/, '') : `https
 const ADMIN_PWD = import.meta.env.VITE_ADMIN_PASSWORD || 'admin_changeme123';
 
 let adminTokenCache: string | null = null;
+let adminTokenInFlight: Promise<string> | null = null;
+// Several polling functions (getEvents, getAnalyticsOverview, getThreatSummary,
+// getRoiEstimate) all call this on the same ~3s interval. Without de-duping the
+// in-flight request, every one of them fires its own /auth/login call whenever
+// the cache is empty (e.g. backend still starting up), flooding the browser's
+// per-origin connection limit and starving unrelated requests (including the
+// login FORM's own fetch) behind the queue.
 async function adminToken(): Promise<string> {
   if (adminTokenCache) return adminTokenCache;
-  const res = await fetch(`${API_BASE}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ subject: 'security_admin', password: ADMIN_PWD }),
-  });
-  if (!res.ok) throw new Error('admin auth failed');
-  const data = await res.json();
-  adminTokenCache = data.access_token;
-  return adminTokenCache!;
+  if (!adminTokenInFlight) {
+    adminTokenInFlight = (async () => {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: 'security_admin', password: ADMIN_PWD }),
+      });
+      if (!res.ok) throw new Error('admin auth failed');
+      const data = await res.json();
+      adminTokenCache = data.access_token;
+      return adminTokenCache!;
+    })().finally(() => {
+      adminTokenInFlight = null;
+    });
+  }
+  return adminTokenInFlight;
 }
 
 export interface ConfigResp {
@@ -66,6 +80,49 @@ export interface LockoutStatus {
   message?: string;
 }
 
+// Phase 5: analytics dashboard
+export interface AnalyticsOverview {
+  tenant_id: string;
+  window_hours: number;
+  total_events: number;
+  outcome_breakdown: Record<string, number>;
+  avg_risk_score: number;
+  max_risk_score: number;
+  unique_subjects_seen: number;
+  currently_blocked_subjects: number;
+  attacks_blocked: number;
+}
+
+// Phase 4: threat detection summary
+export interface ThreatSummary {
+  tenant_id: string;
+  window_hours: number;
+  ip_event_breakdown: Record<string, number>;
+  flagged_ips: Array<{ ip_address: string; violation_count: number }>;
+}
+
+// Phase 5: ROI calculator - see the endpoint's own methodology_note; these are
+// operator-configurable assumptions, not verified industry benchmarks.
+export interface RoiEstimate {
+  tenant_id: string;
+  window_days: number;
+  methodology_note: string;
+  observed: { attacks_blocked: number; requests_denied: number };
+  assumptions: {
+    cost_per_breach_usd: number;
+    breach_probability_per_blocked_attack: number;
+    manual_review_minutes_per_event: number;
+    engineer_hourly_cost_usd: number;
+  };
+  estimated_value: {
+    breaches_avoided: number;
+    breach_cost_avoided_usd: number;
+    manual_review_hours_saved: number;
+    manual_review_cost_saved_usd: number;
+    total_estimated_value_usd: number;
+  };
+}
+
 export async function getConfig(): Promise<ConfigResp> {
   const res = await fetch(`${API_BASE}/config`);
   if (!res.ok) throw new Error(`config: ${res.status}`);
@@ -105,6 +162,33 @@ export async function getEvents(): Promise<AuditEvent[]> {
     explanation: e.details,
     event_type: e.event_type,
   }));
+}
+
+export async function getAnalyticsOverview(tenantId = 'demo', windowHours = 24): Promise<AnalyticsOverview> {
+  const token = await adminToken();
+  const res = await fetch(`${API_BASE}/tenants/${encodeURIComponent(tenantId)}/analytics/overview?window_hours=${windowHours}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`analytics overview: ${res.status}`);
+  return res.json();
+}
+
+export async function getThreatSummary(tenantId = 'demo', windowHours = 24): Promise<ThreatSummary> {
+  const token = await adminToken();
+  const res = await fetch(`${API_BASE}/tenants/${encodeURIComponent(tenantId)}/analytics/threat-summary?window_hours=${windowHours}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`threat summary: ${res.status}`);
+  return res.json();
+}
+
+export async function getRoiEstimate(tenantId = 'demo', windowDays = 30): Promise<RoiEstimate> {
+  const token = await adminToken();
+  const res = await fetch(`${API_BASE}/tenants/${encodeURIComponent(tenantId)}/analytics/roi?window_days=${windowDays}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`roi estimate: ${res.status}`);
+  return res.json();
 }
 
 export interface SimResult {

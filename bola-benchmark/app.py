@@ -24,6 +24,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+# Several startup/log messages below use emoji (checkmarks, warning signs). On Windows,
+# a console left on its default legacy codepage (cp1252 etc., not UTF-8) raises
+# UnicodeEncodeError on those prints and crashes the whole process before it can even
+# bind a port. reconfigure() (Python 3.7+) is a no-op if already UTF-8 and always safe
+# to call on a real stdout/stderr stream.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import bcrypt
 import jwt
 import joblib
@@ -1276,6 +1288,36 @@ ROI_ASSUMED_MANUAL_REVIEW_MINUTES_PER_EVENT = float(os.environ.get("ROI_ASSUMED_
 ROI_ASSUMED_ENGINEER_HOURLY_COST_USD = float(os.environ.get("ROI_ASSUMED_ENGINEER_HOURLY_COST_USD", "75"))
 
 # ===== RATE LIMITING MIDDLEWARE (Per-Tenant) =====
+def _sync_load_or_default_quota(tenant_id: str, quota_key: str) -> str:
+    """Blocking DB read - must only ever be called via asyncio.to_thread from
+    async code (see TenantRateLimitMiddleware), never directly on the event loop."""
+    try:
+        with db() as c:
+            result = c.execute(
+                "SELECT requests_per_minute FROM tenant_quotas WHERE tenant_id = %s",
+                (tenant_id,)
+            ).fetchone()
+            quota_config = json.dumps({
+                "requests_per_minute": result["requests_per_minute"] if result else DEFAULT_REQUESTS_PER_MINUTE
+            })
+            cache_set(quota_key, quota_config, ttl_seconds=REDIS_CACHE_TTL_QUOTAS)
+    except Exception:
+        quota_config = json.dumps({"requests_per_minute": DEFAULT_REQUESTS_PER_MINUTE})
+    return quota_config
+
+
+def _sync_insert_quota_alert_audit(tenant_id: str, usage_percent: float, current: int, rpm_limit: int) -> None:
+    """Blocking DB write - must only ever be called via asyncio.to_thread from async code."""
+    with db() as c:
+        c.execute(
+            "INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "
+            '"authorization", detector_decision, outcome, explanation, risk_score) '
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (tenant_id, time.time(), "system", "quota_alert", None, "alert", "quota_warning",
+             f"Tenant quota usage at {usage_percent:.1f}% ({current}/{rpm_limit} requests/min)", 0.0)
+        )
+
+
 class TenantRateLimitMiddleware(BaseHTTPMiddleware):
     """Per-tenant rate limiting with quota enforcement."""
 
@@ -1286,24 +1328,16 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in ["/health", "/metrics"]:
             return await call_next(request)
 
-        # Get tenant quota from cache or DB
+        # Get tenant quota from cache or DB. Every request without Redis caching
+        # (e.g. local dev with Redis unavailable) hits the DB here, so this must run
+        # off the event loop thread - a blocking SQLite call directly inside this
+        # async dispatch() would otherwise serialize every concurrent request
+        # site-wide behind whichever one happens to be doing I/O.
         quota_key = f"quota:{tenant_id}"
         quota_config = cache_get(quota_key)
 
         if not quota_config:
-            # Load from DB
-            try:
-                with db() as c:
-                    result = c.execute(
-                        "SELECT requests_per_minute FROM tenant_quotas WHERE tenant_id = %s",
-                        (tenant_id,)
-                    ).fetchone()
-                    quota_config = json.dumps({
-                        "requests_per_minute": result["requests_per_minute"] if result else DEFAULT_REQUESTS_PER_MINUTE
-                    })
-                    cache_set(quota_key, quota_config, ttl_seconds=REDIS_CACHE_TTL_QUOTAS)
-            except Exception:
-                quota_config = json.dumps({"requests_per_minute": DEFAULT_REQUESTS_PER_MINUTE})
+            quota_config = await asyncio.to_thread(_sync_load_or_default_quota, tenant_id, quota_key)
 
         quota = json.loads(quota_config)
         rpm_limit = quota["requests_per_minute"]
@@ -1340,14 +1374,7 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
                 # Alert if quota threshold exceeded
                 if usage_percent > QUOTA_ALERT_THRESHOLD_PERCENT and current % QUOTA_ALERT_BATCH_SIZE == 0:
                     try:
-                        with db() as c:
-                            c.execute(
-                                "INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "
-                                '"authorization", detector_decision, outcome, explanation, risk_score) '
-                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                                (tenant_id, time.time(), "system", "quota_alert", None, "alert", "quota_warning",
-                                 f"Tenant quota usage at {usage_percent:.1f}% ({current}/{rpm_limit} requests/min)", 0.0)
-                            )
+                        await asyncio.to_thread(_sync_insert_quota_alert_audit, tenant_id, usage_percent, current, rpm_limit)
                         # Dispatch alerts asynchronously (fire and forget)
                         asyncio.create_task(
                             dispatch_alerts(
