@@ -1,12 +1,22 @@
 """
 Multi-Tenant Isolation Validation Tests
 Ensures strict isolation between tenants - one tenant cannot leak/access another's data.
+
+Note: These tests require a PostgreSQL database with CyberAccess schema initialized.
+Run with: DATABASE_URL=postgresql://... pytest test_multi_tenant_isolation.py
 """
 import json
 import pytest
 from fastapi.testclient import TestClient
 from app import app, db
 import time
+import os
+
+# Skip all tests if not using PostgreSQL (test requires real database)
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL", "").startswith("postgresql://"),
+    reason="Requires PostgreSQL database (set DATABASE_URL env var)"
+)
 
 client = TestClient(app)
 
