@@ -1229,6 +1229,91 @@ _frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").sp
 _cors_origins = _frontend_origins if _frontend_origins else (["*"] if APP_ENV != "prod" else [])
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
+# ===== RATE LIMITING MIDDLEWARE (Per-Tenant) =====
+class TenantRateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-tenant rate limiting with quota enforcement."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        tenant_id = request.headers.get("X-Tenant-ID") or "demo"
+
+        # Skip rate limiting for health/metrics endpoints
+        if request.url.path in ["/health", "/metrics"]:
+            return await call_next(request)
+
+        # Get tenant quota from cache or DB
+        quota_key = f"quota:{tenant_id}"
+        quota_config = cache_get(quota_key)
+
+        if not quota_config:
+            # Load from DB
+            try:
+                with db() as c:
+                    result = c.execute(
+                        "SELECT requests_per_minute FROM tenant_quotas WHERE tenant_id = %s",
+                        (tenant_id,)
+                    ).fetchone()
+                    quota_config = json.dumps({
+                        "requests_per_minute": result["requests_per_minute"] if result else 1000
+                    })
+                    cache_set(quota_key, quota_config, ttl_seconds=60)
+            except Exception:
+                quota_config = json.dumps({"requests_per_minute": 1000})
+
+        quota = json.loads(quota_config)
+        rpm_limit = quota["requests_per_minute"]
+
+        # Check rate limit using Redis
+        rate_limit_key = f"ratelimit:{tenant_id}"
+        if redis_client:
+            try:
+                current = redis_client.incr(rate_limit_key)
+                if current == 1:
+                    # New key, set expiry to 60 seconds
+                    redis_client.expire(rate_limit_key, 60)
+
+                # Check if over limit
+                if current > rpm_limit:
+                    tenant_quota_usage.labels(tenant_id=tenant_id).set(100)
+                    return Response(
+                        json.dumps({
+                            "error": "Rate limit exceeded",
+                            "limit": rpm_limit,
+                            "current": current,
+                            "retry_after": 60
+                        }),
+                        status_code=429,
+                        media_type="application/json",
+                        headers={"Retry-After": "60"}
+                    )
+
+                # Update quota usage metric
+                usage_percent = (current / rpm_limit) * 100
+                tenant_quota_usage.labels(tenant_id=tenant_id).set(usage_percent)
+
+                # Alert if >80% quota used
+                if usage_percent > 80 and current % 50 == 0:  # Alert every 50 requests over 80%
+                    try:
+                        with db() as c:
+                            c.execute(
+                                "INSERT INTO audit_events (tenant_id, occurred_at, subject_id, record_id, "
+                                '"authorization", detector_decision, outcome, explanation, risk_score) '
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                (tenant_id, time.time(), "system", "quota_alert", None, "alert", "quota_warning",
+                                 f"Tenant quota usage at {usage_percent:.1f}% ({current}/{rpm_limit} requests/min)", 0.0)
+                            )
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # If Redis fails, allow request (fail-open)
+
+        response = await call_next(request)
+        response.headers["X-Tenant-ID"] = tenant_id
+        response.headers["X-Quota-Used"] = str(current if redis_client else 0)
+        response.headers["X-Quota-Limit"] = str(rpm_limit)
+        return response
+
+app.add_middleware(TenantRateLimitMiddleware)
+
 ID_KEY_PATTERN = re.compile(r'(?:^|[_\-.])(?:id|key|ref|uuid|identifier)s?$', re.IGNORECASE)
 
 def extract_candidate_object_ids(payload: Any, depth: int = 5) -> list[tuple[str, str]]:
@@ -2965,6 +3050,124 @@ def create_tenant(request: Request, payload: dict, x_signup_key: str | None = He
         "name": name,
         "api_key": api_key,
         "warning": "This API key is shown once and cannot be retrieved again - store it securely.",
+    }
+
+
+# ===== TENANT QUOTA MANAGEMENT (Phase 2) =====
+@app.get("/tenants/{tenant_id}/quota")
+def get_tenant_quota(tenant_id: str, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    """Get quota configuration for a tenant."""
+    _subject, role, current_tenant = identity
+
+    # Allow admins to query any tenant, others only their own
+    if role != ADMIN_ROLE and current_tenant != tenant_id:
+        raise HTTPException(403, "Insufficient permissions")
+
+    with db() as c:
+        result = c.execute(
+            "SELECT requests_per_minute, max_stored_audit_events, max_audit_retention_days, "
+            "risk_threshold_block, risk_threshold_warn FROM tenant_quotas WHERE tenant_id = %s",
+            (tenant_id,)
+        ).fetchone()
+
+    if not result:
+        # Return defaults
+        result = {
+            "requests_per_minute": 1000,
+            "max_stored_audit_events": 1000000,
+            "max_audit_retention_days": 365,
+            "risk_threshold_block": 90,
+            "risk_threshold_warn": 70
+        }
+
+    return {
+        "tenant_id": tenant_id,
+        "quota": dict(result) if result else {}
+    }
+
+
+@app.post("/tenants/{tenant_id}/quota")
+def update_tenant_quota(tenant_id: str, payload: dict, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    """Update quota configuration for a tenant (admin only)."""
+    _subject, role, _current_tenant = identity
+    require_security_admin(role)
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO tenant_quotas (tenant_id, requests_per_minute, max_stored_audit_events, "
+            "max_audit_retention_days, risk_threshold_block, risk_threshold_warn, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET "
+            "requests_per_minute = COALESCE(EXCLUDED.requests_per_minute, tenant_quotas.requests_per_minute), "
+            "max_stored_audit_events = COALESCE(EXCLUDED.max_stored_audit_events, tenant_quotas.max_stored_audit_events), "
+            "max_audit_retention_days = COALESCE(EXCLUDED.max_audit_retention_days, tenant_quotas.max_audit_retention_days), "
+            "risk_threshold_block = COALESCE(EXCLUDED.risk_threshold_block, tenant_quotas.risk_threshold_block), "
+            "risk_threshold_warn = COALESCE(EXCLUDED.risk_threshold_warn, tenant_quotas.risk_threshold_warn), "
+            "updated_at = EXCLUDED.updated_at",
+            (
+                tenant_id,
+                payload.get("requests_per_minute", 1000),
+                payload.get("max_stored_audit_events", 1000000),
+                payload.get("max_audit_retention_days", 365),
+                payload.get("risk_threshold_block", 90),
+                payload.get("risk_threshold_warn", 70),
+                time.time()
+            )
+        )
+        # Invalidate cache
+        cache_key = f"quota:{tenant_id}"
+        if redis_client:
+            try:
+                redis_client.delete(cache_key)
+            except Exception:
+                pass
+
+    return {"status": "updated", "tenant_id": tenant_id}
+
+
+@app.get("/tenants/{tenant_id}/quota-usage")
+def get_tenant_quota_usage(tenant_id: str, identity: tuple[str, str, str] = Depends(get_current_identity)) -> dict:
+    """Get current quota usage for a tenant."""
+    _subject, role, current_tenant = identity
+
+    # Allow admins to query any tenant, others only their own
+    if role != ADMIN_ROLE and current_tenant != tenant_id:
+        raise HTTPException(403, "Insufficient permissions")
+
+    with db() as c:
+        # Get quota limits
+        quota = c.execute(
+            "SELECT requests_per_minute, max_stored_audit_events FROM tenant_quotas WHERE tenant_id = %s",
+            (tenant_id,)
+        ).fetchone()
+
+        # Get current usage
+        audit_count = c.execute(
+            "SELECT COUNT(*) as cnt FROM audit_events WHERE tenant_id = %s",
+            (tenant_id,)
+        ).fetchone()["cnt"]
+
+    quota_limits = dict(quota) if quota else {"requests_per_minute": 1000, "max_stored_audit_events": 1000000}
+
+    # Get current requests from Redis
+    requests_this_minute = 0
+    if redis_client:
+        try:
+            requests_this_minute = int(redis_client.get(f"ratelimit:{tenant_id}") or 0)
+        except Exception:
+            pass
+
+    return {
+        "tenant_id": tenant_id,
+        "quota_limits": quota_limits,
+        "current_usage": {
+            "requests_this_minute": requests_this_minute,
+            "requests_per_minute_limit": quota_limits["requests_per_minute"],
+            "requests_percent": (requests_this_minute / quota_limits["requests_per_minute"]) * 100,
+            "audit_events_stored": audit_count,
+            "audit_events_limit": quota_limits["max_stored_audit_events"],
+            "audit_events_percent": (audit_count / quota_limits["max_stored_audit_events"]) * 100
+        }
     }
 
 
