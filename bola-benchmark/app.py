@@ -1212,11 +1212,11 @@ class BodyObjectReferenceMiddleware(BaseHTTPMiddleware):
                             if rec:
                                 access = authorization_context(tenant_id, subject, cand_id, action="read")
                                 if access["authorization"] is None:
-                                    engine.evaluate(tenant_id, subject, cand_id, allowed=False, endpoint=f"body_ref:{field_name}")
+                                    decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, cand_id, allowed=False, endpoint=f"body_ref:{field_name}")
                                     record_audit(
                                         tenant_id, subject, cand_id, None, "deny", "denied_body_reference",
                                         [f"Unauthorized foreign object ID '{cand_id}' referenced in body field '{field_name}'."],
-                                        risk_score=100.0
+                                        risk_score=score
                                     )
                     except Exception:
                         pass
@@ -2102,9 +2102,9 @@ def trigger_worker_execution(
     is_owner = job["tenant_id"] == tenant_id and job["subject_id"] == subject
     is_admin = role == ADMIN_ROLE and job["tenant_id"] == tenant_id
     if not (is_owner or is_admin):
-        engine.evaluate(tenant_id, subject, job_id, allowed=False, endpoint="async_jobs")
+        decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, job_id, allowed=False, endpoint="async_jobs")
         record_audit(tenant_id, subject, job_id, None, "deny", "denied_job_execute",
-                     [f"Second-order BOLA prevented: '{subject}' attempted to execute a job owned by another subject/tenant."], risk_score=100.0)
+                     [f"Second-order BOLA prevented: '{subject}' attempted to execute a job owned by another subject/tenant."], risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this job",
                                          "attack_type": "second_order_bola"})
     return execute_async_job(job_id)
@@ -2129,9 +2129,9 @@ def create_stored_reference(
 
     access = authorization_context(tenant_id, subject, target_id, action="read")
     if access["authorization"] is None:
-        engine.evaluate(tenant_id, subject, target_id, allowed=False, endpoint="stored_ref")
+        decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, target_id, allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, subject, target_id, None, "deny", "denied_stored_bola_creation",
-                     ["Second-order BOLA violation: Cannot register reference to unauthorized resource."], risk_score=100.0)
+                     ["Second-order BOLA violation: Cannot register reference to unauthorized resource."], risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented: Cannot store pointer to unowned resource",
                                          "attack_type": "second_order_bola"})
 
@@ -2170,9 +2170,9 @@ def trigger_stored_reference(
     is_owner = subject == ref["subject_id"]
     is_admin = role == ADMIN_ROLE
     if not (is_owner or is_admin):
-        engine.evaluate(tenant_id, subject, ref["target_resource_id"], allowed=False, endpoint="stored_ref")
+        decision, signals, unseen, score, category = engine.evaluate(tenant_id, subject, ref["target_resource_id"], allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, subject, ref["target_resource_id"], None, "deny", "denied_stored_ref_cross_subject",
-                     [f"Second-order BOLA prevented: '{subject}' attempted to trigger a stored reference owned by another subject."], risk_score=100.0)
+                     [f"Second-order BOLA prevented: '{subject}' attempted to trigger a stored reference owned by another subject."], risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "You do not own this stored reference",
                                          "attack_type": "second_order_bola"})
 
@@ -2183,9 +2183,9 @@ def trigger_stored_reference(
     if access["authorization"] is None:
         with db() as c:
             c.execute("UPDATE stored_references SET status = 'security_flagged' WHERE id = %s", (ref_id,))
-        engine.evaluate(tenant_id, ref["subject_id"], target_id, allowed=False, endpoint="stored_ref")
+        decision, signals, unseen, score, category = engine.evaluate(tenant_id, ref["subject_id"], target_id, allowed=False, endpoint="stored_ref")
         record_audit(tenant_id, ref["subject_id"], target_id, None, "deny", "denied_stored_bola_consumption",
-                     ["Second-order BOLA detected at trigger time: authorization has lapsed or resource changed owners."], risk_score=100.0)
+                     ["Second-order BOLA detected at trigger time: authorization has lapsed or resource changed owners."], risk_score=score)
         raise HTTPException(403, detail={"outcome": "denied", "reason": "Second-order BOLA prevented at consumption time",
                                          "ref_status": "security_flagged"})
 
@@ -2487,7 +2487,7 @@ def get_audit_events(identity: tuple[str, str, str] = Depends(get_current_identi
     require_security_admin(role)
     with db() as c:
         rows = c.execute(
-            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation, risk_score '
             "FROM audit_events WHERE tenant_id = %s ORDER BY id DESC LIMIT 100", (tenant_id,)).fetchall()
     return {"events": [dict(row) for row in rows]}
 
@@ -2535,7 +2535,7 @@ def simulate_low_and_slow(request: Request, _guard: None = Depends(guard_demo_en
     for i in range(15):
         event_time = now - (3600) + (i * 240)
         engine.record_event(DEMO_TENANT_ID, subject, 50 + i, False, event_time)
-        record_audit(DEMO_TENANT_ID, subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"], risk_score=50.0 + (i * 5))
+        record_audit(DEMO_TENANT_ID, subject, 50 + i, None, "deny", "denied", ["Simulated low and slow deny"], risk_score=max(0.0, min(100.0, 50.0 + (i * 5))))
 
     headers = _login_headers(client, subject)
     res = client.get("/records/66", headers=headers)
@@ -2603,7 +2603,7 @@ def get_events(identity: tuple[str, str, str] = Depends(get_current_identity)) -
     require_security_admin(role)
     with db() as c:
         rows = c.execute(
-            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation, risk_score '
             "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo') ORDER BY id DESC LIMIT 100", (tenant_id, tenant_id)).fetchall()
     return {"events": [dict(row) for row in rows]}
 
@@ -2615,7 +2615,7 @@ def get_audit_timeline(identity: tuple[str, str, str] = Depends(get_current_iden
     clamped_limit = max(1, min(limit, 200))
     with db() as c:
         rows = c.execute(
-            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation, risk_score '
             "FROM audit_events WHERE (tenant_id = %s OR %s = 'demo' OR tenant_id = 'lost_found_dev') AND ("
             "  detector_decision != 'allow' OR "
             "  outcome != 'allowed' OR "
@@ -3038,7 +3038,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
     detector_explanations = explain_detector_signals(signals)
 
     outcome = "blocked" if decision == "block" else ("allowed" if authorized else "denied")
-    record_audit(tenant_id, subject, resource_id, "authorized" if authorized else None, decision, outcome, detector_explanations)
+    record_audit(tenant_id, subject, resource_id, "authorized" if authorized else None, decision, outcome, detector_explanations, risk_score=score)
     if decision == "block":
         dispatch_soc_alert(tenant_id, subject, resource_id, score, category, signals)
 
@@ -3057,7 +3057,8 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             "TIMER_LOCKOUT",
             "block",
             "blocked",
-            [f"Quarantine cooldown timer active: {remaining}s remaining (Strike {strike_count}/3, Expires at {expiry_str}). Navigation channels quarantined."]
+            [f"Quarantine cooldown timer active: {remaining}s remaining (Strike {strike_count}/3, Expires at {expiry_str}). Navigation channels quarantined."],
+            risk_score=score
         )
 
     return {
@@ -3277,7 +3278,7 @@ def get_forensic_audit_proof(identity: tuple[str, str, str] = Depends(get_curren
     _subject, _role, tenant_id = identity
     with db() as c:
         rows = c.execute(
-            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation '
+            'SELECT id, occurred_at, subject_id, record_id, "authorization", detector_decision, outcome, explanation, risk_score '
             "FROM audit_events WHERE tenant_id = %s ORDER BY id ASC", (tenant_id,)).fetchall()
 
     if not rows:
@@ -3299,7 +3300,7 @@ def get_forensic_audit_proof(identity: tuple[str, str, str] = Depends(get_curren
 
     running_hash = hashlib.sha256(f"GENESIS:{tenant_id}".encode()).hexdigest()
     for row in rows:
-        block_content = f"{running_hash}|{row['id']}|{row['occurred_at']}|{row['subject_id']}|{row['record_id']}|{row['outcome']}"
+        block_content = f"{running_hash}|{row['id']}|{row['occurred_at']}|{row['subject_id']}|{row['record_id']}|{row['outcome']}|{row['risk_score']}"
         running_hash = hashlib.sha256(block_content.encode()).hexdigest()
 
     return {
