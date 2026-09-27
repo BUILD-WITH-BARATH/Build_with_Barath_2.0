@@ -13,4 +13,3 @@ strawberry-graphql[fastapi]>=0.327.0
 psycopg[binary]==3.2.1
 redis==5.2.1
 prometheus-client==0.21.0
-httpx==0.28.1

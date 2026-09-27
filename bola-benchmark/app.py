@@ -52,6 +52,9 @@ from migrations import apply_migrations, compute_audit_hash
 # Alerting system
 from alerting import dispatch_alerts
 
+# Phase 4: advanced threat detection (IP reputation, geo-velocity, behavioral baselining, TLS fingerprint)
+import threat_detection
+
 # --- Configuration (env-overridable; defaults are dev-only, never use these in production) ---
 APP_ENV = os.environ.get("APP_ENV", "dev")
 DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() != "false"
@@ -1225,6 +1228,23 @@ tenant_quota_usage = Gauge('tenant_quota_usage_percent', 'Tenant quota usage %',
 redis_cache_hits = Counter('redis_cache_hits_total', 'Redis cache hits', ['cache_type'])
 redis_cache_misses = Counter('redis_cache_misses_total', 'Redis cache misses', ['cache_type'])
 
+# Phase 4: advanced threat detection metrics
+threat_ip_reputation_flags = Counter('threat_ip_reputation_flags_total', 'Requests from an IP flagged by internal reputation scoring', ['tenant_id'])
+threat_geo_velocity_flags = Counter('threat_geo_velocity_flags_total', 'Impossible-travel anomalies detected', ['tenant_id'])
+threat_tls_fingerprint_flags = Counter('threat_tls_fingerprint_flags_total', 'Requests matching a blocklisted TLS/JA3 fingerprint', ['tenant_id'])
+threat_behavioral_anomaly_flags = Counter('threat_behavioral_anomaly_flags_total', 'Requests deviating sharply from a subject\'s behavioral baseline', ['tenant_id'])
+
+
+def extract_client_ip(request: Request) -> str:
+    """Best-effort client IP: prefer the first hop of X-Forwarded-For (set by an upstream
+    proxy/load balancer in production), else the direct connection's address."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        first_hop = forwarded.split(",")[0].strip()
+        if first_hop:
+            return first_hop
+    return request.client.host if request.client else "unknown"
+
 # Metrics endpoint for Prometheus scraping
 @app.get("/metrics")
 def metrics():
@@ -1637,6 +1657,61 @@ def dispatch_soc_alert(tenant_id: str, subject: str, record_id: int | str, score
 
     broadcast_sse_event("soc_alert", alert_payload)
     return alert_payload
+
+
+def _run_threat_detection(request: Request, tenant_id: str, subject: str, endpoint: str,
+                           final_decision: str, now_ts: float) -> dict:
+    """Phase 4 advanced threat detection. Purely observational: records signals, updates
+    metrics, and audit-logs anomalies, but never changes final_decision itself - the BOLA
+    risk engine's decision (computed above) is left untouched.
+    """
+    if not threat_detection.THREAT_DETECTION_ENABLED:
+        return {"enabled": False}
+
+    client_ip = extract_client_ip(request)
+    ja3_hash = request.headers.get("X-JA3-Fingerprint")
+
+    ip_event_type = "bola_violation" if final_decision == "block" else ("denied_auth" if final_decision == "deny" else "request")
+    threat_detection.record_ip_event(db, tenant_id, client_ip, ip_event_type, subject_id=subject)
+
+    ip_reputation = threat_detection.internal_ip_reputation(db, tenant_id, client_ip, now=now_ts)
+    tls_check = threat_detection.check_tls_fingerprint(ja3_hash)
+    behavioral = threat_detection.update_behavioral_baseline(db, tenant_id, subject, endpoint, now=now_ts)
+
+    geo_velocity = {"flagged": False}
+    location = threat_detection.geolocate_ip_sync(client_ip)
+    if location:
+        geo_velocity = threat_detection.check_geo_velocity(db, tenant_id, subject, client_ip, location, now=now_ts)
+
+    if ip_reputation["flagged"]:
+        threat_ip_reputation_flags.labels(tenant_id=tenant_id).inc()
+    if tls_check["flagged"]:
+        threat_tls_fingerprint_flags.labels(tenant_id=tenant_id).inc()
+    if behavioral["flagged"]:
+        threat_behavioral_anomaly_flags.labels(tenant_id=tenant_id).inc()
+    if geo_velocity["flagged"]:
+        threat_geo_velocity_flags.labels(tenant_id=tenant_id).inc()
+
+    flagged_reasons = []
+    if ip_reputation["flagged"]:
+        flagged_reasons.append(f"IP {client_ip} has {ip_reputation['violation_score']} recent violation points")
+    if tls_check["flagged"]:
+        flagged_reasons.append(f"TLS fingerprint {tls_check['ja3_hash']} matches operator blocklist")
+    if behavioral["flagged"]:
+        flagged_reasons.append(f"Request pace {behavioral['deviation_ratio']}x subject's baseline")
+    if geo_velocity["flagged"]:
+        flagged_reasons.append(geo_velocity["reason"])
+
+    if flagged_reasons:
+        record_audit(tenant_id, subject, "threat_signal", None, "flag", "threat_detected", flagged_reasons)
+
+    return {
+        "enabled": True,
+        "ip_reputation": ip_reputation,
+        "tls_fingerprint": tls_check,
+        "behavioral_baseline": behavioral,
+        "geo_velocity": geo_velocity,
+    }
 
 
 @app.get("/events/stream")
@@ -3363,6 +3438,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             "strike_count": 0,
             "trial_count": 0,
             "max_trials": 3,
+            "threat_intel": {"enabled": False, "skipped": "defense_system_disabled"},
         }
 
     subject = payload.get("subject")
@@ -3404,6 +3480,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             "strike_count": max(1, current_strikes),
             "max_strikes": 3,
             "risk_tier": "Attack (90-100)",
+            "threat_intel": {"enabled": threat_detection.THREAT_DETECTION_ENABLED, "skipped": "subject_already_locked_out"},
         }
 
     # 2. Risk evaluation via BehavioralRiskEngine (Point-based scoring from architecture specification)
@@ -3478,6 +3555,8 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
             risk_score=score
         )
 
+    threat_intel = _run_threat_detection(request, tenant_id, subject, endpoint, final_decision, now_ts)
+
     return {
         "decision": final_decision,
         "score": max(0.0, min(100.0, float(score))),
@@ -3489,6 +3568,7 @@ def v1_authorize(request: Request, payload: dict, tenant_id: str = Depends(get_t
         "strike_count": max(1, strike_count) if final_decision == "block" else strike_count,
         "max_strikes": 3,
         "risk_tier": "Normal (0-39)" if score < 40 else ("Suspicious (40-69)" if score < 70 else ("High Risk (70-89)" if score < 90 else "Attack (90-100)")),
+        "threat_intel": threat_intel,
     }
 
 

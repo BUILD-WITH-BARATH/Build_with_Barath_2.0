@@ -147,6 +147,12 @@ MIGRATIONS = [
             PRIMARY KEY (tenant_id, subject_id)
         );
     """),
+
+    (17, """
+        -- Phase 4: track how many samples fed each behavioral baseline, so deviation
+        -- scoring can wait until a profile is actually mature before flagging anything.
+        ALTER TABLE behavioral_profiles ADD COLUMN sample_count INT DEFAULT 0;
+    """),
 ]
 
 
