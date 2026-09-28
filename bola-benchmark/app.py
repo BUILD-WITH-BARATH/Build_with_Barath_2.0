@@ -3209,19 +3209,31 @@ def create_tenant(request: Request, payload: dict, x_signup_key: str | None = He
     return _create_tenant_record(name)
 
 
+def _validate_and_create_tenant(name: Optional[str], email: Optional[str]) -> dict:
+    if not name or not str(name).strip():
+        raise HTTPException(400, "name is required")
+    if email is not None and (not isinstance(email, str) or "@" not in email):
+        raise HTTPException(400, "email must be a valid email address")
+    return _create_tenant_record(str(name).strip(), email)
+
+
 @app.post("/v1/signup")
 @limiter.limit("5/hour")
 def public_signup(request: Request, payload: dict) -> dict:
     """Public self-serve tenant signup - no signup key required, meant to be called
     directly from a website's own signup form. Rate-limited per IP (5/hour) since,
     unlike /v1/tenants, this has no pre-shared secret gating who can call it."""
-    name = payload.get("name")
-    if not name or not str(name).strip():
-        raise HTTPException(400, "name is required")
-    email = payload.get("email")
-    if email is not None and (not isinstance(email, str) or "@" not in email):
-        raise HTTPException(400, "email must be a valid email address")
-    return _create_tenant_record(str(name).strip(), email)
+    return _validate_and_create_tenant(payload.get("name"), payload.get("email"))
+
+
+@app.get("/v1/signup")
+@limiter.limit("5/hour")
+def public_signup_get(request: Request, name: str, email: Optional[str] = None) -> dict:
+    """GET counterpart of the above, for browser clients where POST is impractical
+    (e.g. local network security software intercepting POST bodies to localhost -
+    see bola-benchmark/run_dev_server.py). Same validation, same rate limit, same
+    underlying tenant creation - just a different HTTP method."""
+    return _validate_and_create_tenant(name, email)
 
 
 # ===== TENANT QUOTA MANAGEMENT (Phase 2) =====

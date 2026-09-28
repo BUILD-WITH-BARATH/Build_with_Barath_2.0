@@ -171,12 +171,31 @@ export interface SignupResult {
   warning: string;
 }
 
+const SIGNUP_TIMEOUT_MS = 10000;
+
 export async function signup(name: string, email?: string): Promise<SignupResult> {
-  const res = await fetch(`${API_BASE}/v1/signup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(email ? { name, email } : { name }),
-  });
+  // Uses GET, not POST: local network security software (e.g. Windows Defender's
+  // Network Inspection Service) intercepting POST bodies to localhost made the
+  // POST version unreliable on some machines - see app.py's /v1/signup GET
+  // counterpart and run_dev_server.py's history notes.
+  const params = new URLSearchParams({ name });
+  if (email) params.set('email', email);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/v1/signup?${params.toString()}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(SIGNUP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error(
+        `No response after ${SIGNUP_TIMEOUT_MS / 1000}s. The backend may be unreachable, or something ` +
+        `on this network (antivirus/firewall) is blocking the request - see the backend console for whether it arrived at all.`
+      );
+    }
+    throw err;
+  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `Signup failed (${res.status})`);
