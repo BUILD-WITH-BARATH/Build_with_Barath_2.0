@@ -174,12 +174,17 @@ export interface SignupResult {
 const SIGNUP_TIMEOUT_MS = 10000;
 
 export async function signup(name: string, email?: string): Promise<SignupResult> {
+  // Uses GET, not POST: local network security software (e.g. Windows Defender's
+  // Network Inspection Service) intercepting POST bodies to localhost made the
+  // POST version unreliable on some machines - see app.py's /v1/signup GET
+  // counterpart and run_dev_server.py's history notes.
+  const params = new URLSearchParams({ name });
+  if (email) params.set('email', email);
+
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/v1/signup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(email ? { name, email } : { name }),
+    res = await fetch(`${API_BASE}/v1/signup?${params.toString()}`, {
+      method: 'GET',
       signal: AbortSignal.timeout(SIGNUP_TIMEOUT_MS),
     });
   } catch (err) {
