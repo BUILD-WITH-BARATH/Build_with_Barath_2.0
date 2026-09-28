@@ -6,6 +6,8 @@ interface LoginProps {
   onLoginSuccess: (token: string) => void;
 }
 
+const LOGIN_TIMEOUT_MS = 10000;
+
 export default function Login({ onLoginSuccess }: LoginProps) {
   const [subject, setSubject] = useState('security_admin');
   const [password, setPassword] = useState('');
@@ -22,6 +24,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subject, password }),
+        signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
       });
 
       if (!res.ok) {
@@ -32,7 +35,14 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       const { access_token } = await res.json();
       onLoginSuccess(access_token);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      if (err instanceof DOMException && err.name === 'TimeoutError') {
+        setError(
+          `No response after ${LOGIN_TIMEOUT_MS / 1000}s. The backend may be unreachable, or something ` +
+          `on this network (antivirus/firewall) is blocking the request.`
+        );
+      } else {
+        setError(err instanceof Error ? err.message : 'Login failed');
+      }
     } finally {
       setLoading(false);
     }
